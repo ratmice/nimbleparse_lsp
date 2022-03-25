@@ -1,5 +1,8 @@
 use tower_lsp::jsonrpc;
 use tower_lsp::lsp_types as lsp;
+use tower_lsp::lsp_types::FileOperationPattern;
+use tower_lsp::lsp_types::FileOperationPatternKind;
+use tower_lsp::lsp_types::FileOperationPatternOptions;
 
 #[derive(thiserror::Error, Debug)]
 enum ServerError {
@@ -22,11 +25,71 @@ struct Backend {
 
 #[tower_lsp::async_trait]
 impl tower_lsp::LanguageServer for Backend {
-    async fn initialize(&self, _: lsp::InitializeParams) -> jsonrpc::Result<lsp::InitializeResult> {
+    async fn initialize(
+        &self,
+        params: lsp::InitializeParams,
+    ) -> jsonrpc::Result<lsp::InitializeResult> {
+        self.client
+            .log_message(lsp::MessageType::LOG, "initializing...")
+            .await;
+        if params.workspace_folders.is_none() {
+            return Err(tower_lsp::jsonrpc::Error {
+                code: tower_lsp::jsonrpc::ErrorCode::ServerError(-32002),
+                message: "Server not initialized: no known Workspace".to_string(),
+                data: None,
+            });
+        }
+
+        let paths = params.workspace_folders.unwrap();
+        let paths = paths
+            .iter()
+            .map(|folder| folder.uri.to_file_path().unwrap());
+        let workspaces = paths
+            .clone()
+            .map(|path| {
+                let toml_file = std::fs::read_to_string(path.join("nimbleparse.toml")).unwrap();
+                let workspace: nimbleparse_toml::Workspace =
+                    toml::de::from_slice(toml_file.as_bytes()).unwrap();
+                workspace
+            })
+            .collect::<Vec<_>>();
+
+        let extension_filters = workspaces
+            .iter()
+            .flat_map(|workspace| {
+                workspace
+                    .parsers
+                    .iter()
+                    .map(|parser| lsp::FileOperationFilter {
+                        scheme: Some("file".to_string()),
+                        pattern: FileOperationPattern {
+                            glob: format!("**/{}", parser.extension),
+                            matches: Some(FileOperationPatternKind::File),
+                            options: Some(FileOperationPatternOptions { ignore_case: None }),
+                        },
+                    })
+            })
+            .collect::<Vec<_>>();
+
+        self.client
+            .log_message(lsp::MessageType::LOG, format!("workspace {:?}", workspaces))
+            .await;
         Ok(lsp::InitializeResult {
             capabilities: lsp::ServerCapabilities {
                 hover_provider: Some(lsp::HoverProviderCapability::Simple(true)),
                 completion_provider: Some(lsp::CompletionOptions::default()),
+                workspace: Some(lsp::WorkspaceServerCapabilities {
+                    workspace_folders: Some(lsp::WorkspaceFoldersServerCapabilities {
+                        supported: Some(true),
+                        change_notifications: Some(lsp::OneOf::Left(true)),
+                    }),
+                    file_operations: Some(lsp::WorkspaceFileOperationsServerCapabilities {
+                        did_create: Some(lsp::FileOperationRegistrationOptions {
+                            filters: extension_filters,
+                        }),
+                        ..Default::default()
+                    }),
+                }),
                 ..Default::default()
             },
             ..Default::default()
