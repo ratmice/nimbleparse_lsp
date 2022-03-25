@@ -1,0 +1,16 @@
+[package]
+name = "nimbleparse_lsp"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+log = "0.4.15"
+thiserror = "1.0.30"
+tokio = {version = "1.17.0", features=["fs", "macros", "rt-multi-thread", "io-std", "process"]}
+tower-lsp = "0.16.0"
+nimbleparse_toml = {path = "../toml"}
+toml = {version = "0.5.8", features=["preserve_order"]}
+serde-transcode = "1.1.1"
+serde_json = { version = "1.0.79", features=["preserve_order"]}
