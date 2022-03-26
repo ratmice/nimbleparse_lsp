@@ -1,8 +1,5 @@
 use tower_lsp::jsonrpc;
 use tower_lsp::lsp_types as lsp;
-use tower_lsp::lsp_types::FileOperationPattern;
-use tower_lsp::lsp_types::FileOperationPatternKind;
-use tower_lsp::lsp_types::FileOperationPatternOptions;
 
 #[derive(thiserror::Error, Debug)]
 enum ServerError {
@@ -47,6 +44,10 @@ impl tower_lsp::LanguageServer for Backend {
         let workspaces = paths
             .clone()
             .map(|path| {
+                /*
+                 * While this is sync in async it isn't like there are any other tasks
+                 * during initialization. Not really worth worrying about.
+                 */
                 let toml_file = std::fs::read_to_string(path.join("nimbleparse.toml")).unwrap();
                 let workspace: nimbleparse_toml::Workspace =
                     toml::de::from_slice(toml_file.as_bytes()).unwrap();
@@ -62,10 +63,10 @@ impl tower_lsp::LanguageServer for Backend {
                     .iter()
                     .map(|parser| lsp::FileOperationFilter {
                         scheme: Some("file".to_string()),
-                        pattern: FileOperationPattern {
+                        pattern: lsp::FileOperationPattern {
                             glob: format!("**/{}", parser.extension),
-                            matches: Some(FileOperationPatternKind::File),
-                            options: Some(FileOperationPatternOptions { ignore_case: None }),
+                            matches: Some(lsp::FileOperationPatternKind::File),
+                            options: Some(lsp::FileOperationPatternOptions { ignore_case: None }),
                         },
                     })
             })
