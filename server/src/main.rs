@@ -51,25 +51,6 @@ impl tower_lsp::LanguageServer for Backend {
             initialize_failed("no known workspace")?;
         }
 
-        let workspace_caps = caps.workspace.unwrap();
-        if workspace_caps.file_operations.is_none() {
-            initialize_failed("client lacks file operations capabilities")?;
-        }
-        let fileop_caps = workspace_caps.file_operations.unwrap();
-        self.client
-            .log_message(lsp::MessageType::LOG, format!("{:?}", fileop_caps))
-            .await;
-
-        if !fileop_caps.did_create.unwrap_or(false) {
-            initialize_failed("client lacks did_create")?;
-        }
-        if !fileop_caps.did_rename.unwrap_or(false) {
-            initialize_failed("client lacks did_rename")?;
-        }
-        if !fileop_caps.did_delete.unwrap_or(false) {
-            initialize_failed("client lacks did_delete")?;
-        }
-
         let mut state = self.state.lock().await;
         let paths = params.workspace_folders.unwrap();
         let paths = paths
@@ -87,29 +68,10 @@ impl tower_lsp::LanguageServer for Backend {
             .collect::<Vec<_>>();
 
         state.toml = Some(workspaces.clone());
-        let extension_filters = workspaces
-            .iter()
-            .flat_map(|workspace| {
-                workspace
-                    .parsers
-                    .iter()
-                    .map(|parser| lsp::FileOperationFilter {
-                        scheme: Some("file".to_string()),
-                        pattern: lsp::FileOperationPattern {
-                            glob: format!("**/*{}", parser.extension),
-                            matches: Some(lsp::FileOperationPatternKind::File),
-                            options: Some(lsp::FileOperationPatternOptions { ignore_case: None }),
-                        },
-                    })
-            })
-            .collect::<Vec<_>>();
-
         self.client
             .log_message(lsp::MessageType::LOG, format!("workspace {:?}", workspaces))
             .await;
-        let filters = Some(lsp::FileOperationRegistrationOptions {
-            filters: extension_filters,
-        });
+
         Ok(lsp::InitializeResult {
             capabilities: lsp::ServerCapabilities {
                 text_document_sync: Some(lsp::TextDocumentSyncCapability::Kind(
@@ -117,15 +79,6 @@ impl tower_lsp::LanguageServer for Backend {
                 )),
                 hover_provider: Some(lsp::HoverProviderCapability::Simple(true)),
                 completion_provider: Some(lsp::CompletionOptions::default()),
-                workspace: Some(lsp::WorkspaceServerCapabilities {
-                    file_operations: Some(lsp::WorkspaceFileOperationsServerCapabilities {
-                        did_create: filters.clone(),
-                        did_rename: filters.clone(),
-                        did_delete: filters,
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                }),
                 ..Default::default()
             },
             ..Default::default()
