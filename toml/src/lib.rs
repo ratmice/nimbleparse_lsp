@@ -1,20 +1,20 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Workspace {
     pub parsers: Vec<Parser>,
     pub tests: Vec<TestDir>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Parser {
     pub l_file: PathBuf,
     pub y_file: PathBuf,
     pub extension: String,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct TestDir {
     pub dir: PathBuf,
     pub pass: bool,

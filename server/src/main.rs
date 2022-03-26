@@ -17,7 +17,23 @@ enum ServerError {
 
 #[derive(Debug)]
 struct Backend {
+    state: tokio::sync::Mutex<State>,
     client: tower_lsp::Client,
+}
+
+#[derive(Debug, Default)]
+struct State {
+    // Should probably be a HashMap with a path?
+    toml: Option<Vec<nimbleparse_toml::Workspace>>,
+}
+
+fn initialize_failed(reason: &'_ str) -> jsonrpc::Result<lsp::InitializeResult> {
+    Err(tower_lsp::jsonrpc::Error {
+        code: tower_lsp::jsonrpc::ErrorCode::ServerError(-32002),
+        message: format!("Error during server initialization: {reason} "),
+
+        data: None,
+    })
 }
 
 #[tower_lsp::async_trait]
@@ -29,14 +45,32 @@ impl tower_lsp::LanguageServer for Backend {
         self.client
             .log_message(lsp::MessageType::LOG, "initializing...")
             .await;
-        if params.workspace_folders.is_none() {
-            return Err(tower_lsp::jsonrpc::Error {
-                code: tower_lsp::jsonrpc::ErrorCode::ServerError(-32002),
-                message: "Server not initialized: no known workspace".to_string(),
-                data: None,
-            });
+
+        let caps = params.capabilities;
+        if params.workspace_folders.is_none() || caps.workspace.is_none() {
+            initialize_failed("no known workspace")?;
         }
 
+        let workspace_caps = caps.workspace.unwrap();
+        if workspace_caps.file_operations.is_none() {
+            initialize_failed("client lacks file operations capabilities")?;
+        }
+        let fileop_caps = workspace_caps.file_operations.unwrap();
+        self.client
+            .log_message(lsp::MessageType::LOG, format!("{:?}", fileop_caps))
+            .await;
+
+        if !fileop_caps.did_create.unwrap_or(false) {
+            initialize_failed("client lacks did_create")?;
+        }
+        if !fileop_caps.did_rename.unwrap_or(false) {
+            initialize_failed("client lacks did_rename")?;
+        }
+        if !fileop_caps.did_delete.unwrap_or(false) {
+            initialize_failed("client lacks did_delete")?;
+        }
+
+        let mut state = self.state.lock().await;
         let paths = params.workspace_folders.unwrap();
         let paths = paths
             .iter()
@@ -44,10 +78,7 @@ impl tower_lsp::LanguageServer for Backend {
         let workspaces = paths
             .clone()
             .map(|path| {
-                /*
-                 * While this is sync in async it isn't like there are any other tasks
-                 * during initialization. Not really worth worrying about.
-                 */
+                // We should probably fix this, to not be sync when we implement reloading the toml file on change...
                 let toml_file = std::fs::read_to_string(path.join("nimbleparse.toml")).unwrap();
                 let workspace: nimbleparse_toml::Workspace =
                     toml::de::from_slice(toml_file.as_bytes()).unwrap();
@@ -55,6 +86,7 @@ impl tower_lsp::LanguageServer for Backend {
             })
             .collect::<Vec<_>>();
 
+        state.toml = Some(workspaces.clone());
         let extension_filters = workspaces
             .iter()
             .flat_map(|workspace| {
@@ -64,7 +96,7 @@ impl tower_lsp::LanguageServer for Backend {
                     .map(|parser| lsp::FileOperationFilter {
                         scheme: Some("file".to_string()),
                         pattern: lsp::FileOperationPattern {
-                            glob: format!("**/{}", parser.extension),
+                            glob: format!("**/*{}", parser.extension),
                             matches: Some(lsp::FileOperationPatternKind::File),
                             options: Some(lsp::FileOperationPatternOptions { ignore_case: None }),
                         },
@@ -75,21 +107,24 @@ impl tower_lsp::LanguageServer for Backend {
         self.client
             .log_message(lsp::MessageType::LOG, format!("workspace {:?}", workspaces))
             .await;
+        let filters = Some(lsp::FileOperationRegistrationOptions {
+            filters: extension_filters,
+        });
         Ok(lsp::InitializeResult {
             capabilities: lsp::ServerCapabilities {
+                text_document_sync: Some(lsp::TextDocumentSyncCapability::Kind(
+                    lsp::TextDocumentSyncKind::INCREMENTAL,
+                )),
                 hover_provider: Some(lsp::HoverProviderCapability::Simple(true)),
                 completion_provider: Some(lsp::CompletionOptions::default()),
                 workspace: Some(lsp::WorkspaceServerCapabilities {
-                    workspace_folders: Some(lsp::WorkspaceFoldersServerCapabilities {
-                        supported: Some(true),
-                        change_notifications: Some(lsp::OneOf::Left(true)),
-                    }),
                     file_operations: Some(lsp::WorkspaceFileOperationsServerCapabilities {
-                        did_create: Some(lsp::FileOperationRegistrationOptions {
-                            filters: extension_filters,
-                        }),
+                        did_create: filters.clone(),
+                        did_rename: filters.clone(),
+                        did_delete: filters,
                         ..Default::default()
                     }),
+                    ..Default::default()
                 }),
                 ..Default::default()
             },
@@ -98,8 +133,46 @@ impl tower_lsp::LanguageServer for Backend {
     }
 
     async fn initialized(&self, _: lsp::InitializedParams) {
+        let state = self.state.lock().await;
+        let mut globs: Vec<lsp::Registration> = Vec::new();
+        for workspace in state.toml.as_ref().unwrap() {
+            for parser in &workspace.parsers {
+                let glob = format!("**/*{}", parser.extension);
+                let mut reg = serde_json::Map::new();
+                reg.insert(
+                    "globPattern".to_string(),
+                    serde_json::value::Value::String(glob),
+                );
+                let mut watchers = serde_json::Map::new();
+                let blah = vec![serde_json::value::Value::Object(reg)];
+                watchers.insert(
+                    "watchers".to_string(),
+                    serde_json::value::Value::Array(blah),
+                );
+
+                globs.push(lsp::Registration {
+                    id: "1".to_string(),
+                    method: "workspace/didChangeWatchedFiles".to_string(),
+                    register_options: Some(serde_json::value::Value::Object(watchers)),
+                });
+            }
+        }
         self.client
-            .log_message(lsp::MessageType::LOG, "server initialized!")
+            .log_message(
+                lsp::MessageType::LOG,
+                format!("registering! {:?}", globs.clone()),
+            )
+            .await;
+
+        /* The lsp_types and lsp specification documentation say to register this dynamically
+         * rather than statically, I'm not sure of a good place we can register it besides here.
+         * Unfortunately register_capability returns a result, and this notification cannot return one.
+         */
+
+        self.client.register_capability(globs).await.unwrap();
+
+        self.client
+            .log_message(lsp::MessageType::LOG, "initialized!")
             .await;
     }
 
@@ -134,6 +207,45 @@ impl tower_lsp::LanguageServer for Backend {
             range: None,
         }))
     }
+
+    async fn did_create_files(&self, _params: lsp::CreateFilesParams) {
+        self.client
+            .log_message(lsp::MessageType::LOG, "did_create_file")
+            .await;
+    }
+
+    async fn did_delete_files(&self, _params: lsp::DeleteFilesParams) {
+        self.client
+            .log_message(lsp::MessageType::LOG, "did_delete_file")
+            .await;
+    }
+
+    async fn did_rename_files(&self, _params: lsp::RenameFilesParams) {
+        self.client
+            .log_message(lsp::MessageType::LOG, "did_rename_file")
+            .await;
+    }
+    async fn did_change(&self, params: lsp::DidChangeTextDocumentParams) {
+        self.client
+            .log_message(lsp::MessageType::LOG, format!("did_change {:?}", params))
+            .await;
+    }
+    async fn did_open(&self, _params: lsp::DidOpenTextDocumentParams) {
+        self.client
+            .log_message(lsp::MessageType::LOG, "did_open")
+            .await;
+    }
+
+    async fn did_close(&self, _params: lsp::DidCloseTextDocumentParams) {
+        self.client
+            .log_message(lsp::MessageType::LOG, "did_close")
+            .await;
+    }
+    async fn did_change_watched_files(&self, _params: lsp::DidChangeWatchedFilesParams) {
+        self.client
+            .log_message(lsp::MessageType::LOG, "did_change_watched_files")
+            .await;
+    }
 }
 /*
   This is sync because serde here uses the Write trait,
@@ -156,7 +268,10 @@ fn run_server_arg() -> Result<(), ServerError> {
     rt.block_on(async {
         log::set_max_level(log::LevelFilter::Info);
         let (stdin, stdout) = (tokio::io::stdin(), tokio::io::stdout());
-        let (service, socket) = tower_lsp::LspService::new(|client| Backend { client });
+        let (service, socket) = tower_lsp::LspService::new(|client| Backend {
+            state: Default::default(),
+            client,
+        });
         tower_lsp::Server::new(stdin, stdout, socket)
             .serve(service)
             .await;
