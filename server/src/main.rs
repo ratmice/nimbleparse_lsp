@@ -161,23 +161,6 @@ impl tower_lsp::LanguageServer for Backend {
         }))
     }
 
-    async fn did_create_files(&self, _params: lsp::CreateFilesParams) {
-        self.client
-            .log_message(lsp::MessageType::LOG, "did_create_file")
-            .await;
-    }
-
-    async fn did_delete_files(&self, _params: lsp::DeleteFilesParams) {
-        self.client
-            .log_message(lsp::MessageType::LOG, "did_delete_file")
-            .await;
-    }
-
-    async fn did_rename_files(&self, _params: lsp::RenameFilesParams) {
-        self.client
-            .log_message(lsp::MessageType::LOG, "did_rename_file")
-            .await;
-    }
     async fn did_change(&self, params: lsp::DidChangeTextDocumentParams) {
         self.client
             .log_message(lsp::MessageType::LOG, format!("did_change {:?}", params))
