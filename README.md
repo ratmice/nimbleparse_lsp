@@ -8,8 +8,8 @@ This  requires some amount of support from the editor.
 
 | Editor  | supported | excuse                                                  |
 | ------- | ----------|-------------------------------------------------------- |
-| neovim  | [ ]       | not obvious how to dynamically register file extensions |
-| vscode  | [X]       | |
+| neovim  |           | not obvious how to dynamically register file extensions |
+| vscode  | :heavy_check_mark: | |
 
 ## Configuration
 ```
