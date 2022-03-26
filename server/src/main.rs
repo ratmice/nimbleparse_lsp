@@ -1,5 +1,6 @@
 use tower_lsp::jsonrpc;
 use tower_lsp::lsp_types as lsp;
+use xi_rope as rope;
 
 #[derive(thiserror::Error, Debug)]
 enum ServerError {
@@ -24,7 +25,8 @@ struct Backend {
 #[derive(Debug, Default)]
 struct State {
     // Should probably be a HashMap with a path?
-    toml: Option<Vec<nimbleparse_toml::Workspace>>,
+    toml: Vec<nimbleparse_toml::Workspace>,
+    files: imbl::HashMap<lsp::Url, rope::Rope>,
 }
 
 fn initialize_failed(reason: &'_ str) -> jsonrpc::Result<lsp::InitializeResult> {
@@ -56,21 +58,13 @@ impl tower_lsp::LanguageServer for Backend {
         let paths = paths
             .iter()
             .map(|folder| folder.uri.to_file_path().unwrap());
-        let workspaces = paths
-            .clone()
-            .map(|path| {
-                // We should probably fix this, to not be sync when we implement reloading the toml file on change...
-                let toml_file = std::fs::read_to_string(path.join("nimbleparse.toml")).unwrap();
-                let workspace: nimbleparse_toml::Workspace =
-                    toml::de::from_slice(toml_file.as_bytes()).unwrap();
-                workspace
-            })
-            .collect::<Vec<_>>();
-
-        state.toml = Some(workspaces.clone());
-        self.client
-            .log_message(lsp::MessageType::LOG, format!("workspace {:?}", workspaces))
-            .await;
+        state.toml.extend(paths.map(|path| {
+            // We should probably fix this, to not be sync when we implement reloading the toml file on change...
+            let toml_file = std::fs::read_to_string(path.join("nimbleparse.toml")).unwrap();
+            let workspace: nimbleparse_toml::Workspace =
+                toml::de::from_slice(toml_file.as_bytes()).unwrap();
+            workspace
+        }));
 
         Ok(lsp::InitializeResult {
             capabilities: lsp::ServerCapabilities {
@@ -88,7 +82,7 @@ impl tower_lsp::LanguageServer for Backend {
     async fn initialized(&self, _: lsp::InitializedParams) {
         let state = self.state.lock().await;
         let mut globs: Vec<lsp::Registration> = Vec::new();
-        for workspace in state.toml.as_ref().unwrap() {
+        for workspace in &state.toml {
             for parser in &workspace.parsers {
                 let glob = format!("**/*{}", parser.extension);
                 let mut reg = serde_json::Map::new();
@@ -166,18 +160,49 @@ impl tower_lsp::LanguageServer for Backend {
             .log_message(lsp::MessageType::LOG, format!("did_change {:?}", params))
             .await;
     }
-    async fn did_open(&self, _params: lsp::DidOpenTextDocumentParams) {
+
+    async fn did_open(&self, params: lsp::DidOpenTextDocumentParams) {
+        let url = params.text_document.uri;
+        let data = tokio::fs::read_to_string(url.to_file_path().unwrap())
+            .await
+            .unwrap();
+        let rope = rope::Rope::from(data);
+        let mut state = self.state.lock().await;
+        state.files.insert(url, rope);
         self.client
             .log_message(lsp::MessageType::LOG, "did_open")
             .await;
     }
 
-    async fn did_close(&self, _params: lsp::DidCloseTextDocumentParams) {
+    async fn did_close(&self, params: lsp::DidCloseTextDocumentParams) {
+        let url = params.text_document.uri;
+        let mut state = self.state.lock().await;
+        state.files.remove(&url);
         self.client
             .log_message(lsp::MessageType::LOG, "did_close")
             .await;
     }
-    async fn did_change_watched_files(&self, _params: lsp::DidChangeWatchedFilesParams) {
+    
+    async fn did_change_watched_files(&self, params: lsp::DidChangeWatchedFilesParams) {
+        for file_event in params.changes {
+            match file_event.typ {
+                lsp::FileChangeType::CREATED | lsp::FileChangeType::CHANGED => {
+                    let url = file_event.uri;
+                    let data = tokio::fs::read_to_string(url.to_file_path().unwrap())
+                        .await
+                        .unwrap();
+                    let rope = rope::Rope::from(data);
+                    let mut state = self.state.lock().await;
+                    state.files.insert(url, rope);
+                }
+                lsp::FileChangeType::DELETED => {
+                    let mut state = self.state.lock().await;
+                    state.files.remove(&file_event.uri);
+                }
+                _ => {}
+            }
+        }
+
         self.client
             .log_message(lsp::MessageType::LOG, "did_change_watched_files")
             .await;
