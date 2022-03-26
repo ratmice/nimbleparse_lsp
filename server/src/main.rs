@@ -35,7 +35,7 @@ impl tower_lsp::LanguageServer for Backend {
         if params.workspace_folders.is_none() {
             return Err(tower_lsp::jsonrpc::Error {
                 code: tower_lsp::jsonrpc::ErrorCode::ServerError(-32002),
-                message: "Server not initialized: no known Workspace".to_string(),
+                message: "Server not initialized: no known workspace".to_string(),
                 data: None,
             });
         }
@@ -138,7 +138,7 @@ impl tower_lsp::LanguageServer for Backend {
   This is sync because serde here uses the Write trait,
   rather than AsyncWrite.
 */
-fn handle_workspace(path: &str) -> Result<(), ServerError> {
+fn handle_workspace_arg(path: &str) -> Result<(), ServerError> {
     let toml_file = std::fs::read_to_string(path)?;
     let workspace: nimbleparse_toml::Workspace = toml::de::from_slice(toml_file.as_bytes())?;
     serde_json::to_writer(std::io::stdout(), &workspace)?;
@@ -148,7 +148,7 @@ fn handle_workspace(path: &str) -> Result<(), ServerError> {
 /*
     The main loop for the server which starts up an Async block and tower_lsp serve.
 */
-fn run_server() -> Result<(), ServerError> {
+fn run_server_arg() -> Result<(), ServerError> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_io()
         .build()?;
@@ -176,13 +176,13 @@ fn main() -> Result<(), ServerError> {
         if arg == "--workspace" {
             if let Some(file) = args.next() {
                 // Sync
-                handle_workspace(&file)
+                handle_workspace_arg(&file)
             } else {
                 Err(ServerError::RequiresPath)
             }
         } else if arg == "--server" {
             // Async
-            run_server()
+            run_server_arg()
         } else {
             Err(ServerError::UnknownArgument)
         }
