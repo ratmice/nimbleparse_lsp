@@ -156,18 +156,32 @@ impl tower_lsp::LanguageServer for Backend {
     }
 
     async fn did_change(&self, params: lsp::DidChangeTextDocumentParams) {
+        let mut state = self.state.lock().await;
+        let rope = state
+            .files
+            .entry(params.text_document.uri)
+            .or_insert(rope::Rope::from(""));
+        for change in params.content_changes {
+            if let Some(range) = change.range {
+                let line_start_pos = rope.offset_of_line(range.start.line as usize);
+                let line_end_pos = rope.offset_of_line(range.end.line as usize);
+                let start = line_start_pos + range.start.character as usize;
+                let end = line_end_pos + range.end.character as usize;
+                rope.edit(start..end, change.text);
+            } else {
+                rope.edit(0..rope.len(), change.text);
+            }
+        }
         self.client
-            .log_message(lsp::MessageType::LOG, format!("did_change {:?}", params))
+            .log_message(lsp::MessageType::LOG, format!("did_change: {}", rope))
             .await;
     }
 
     async fn did_open(&self, params: lsp::DidOpenTextDocumentParams) {
         let url = params.text_document.uri;
-        let data = tokio::fs::read_to_string(url.to_file_path().unwrap())
-            .await
-            .unwrap();
-        let rope = rope::Rope::from(data);
         let mut state = self.state.lock().await;
+        let rope = rope::Rope::from(params.text_document.text);
+
         state.files.insert(url, rope);
         self.client
             .log_message(lsp::MessageType::LOG, "did_open")
@@ -182,7 +196,7 @@ impl tower_lsp::LanguageServer for Backend {
             .log_message(lsp::MessageType::LOG, "did_close")
             .await;
     }
-    
+
     async fn did_change_watched_files(&self, params: lsp::DidChangeWatchedFilesParams) {
         for file_event in params.changes {
             match file_event.typ {
