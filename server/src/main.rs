@@ -24,16 +24,26 @@ struct Backend {
 
 #[derive(Debug, Default)]
 struct State {
-    // Should probably be a HashMap with a path?
-    toml: Vec<nimbleparse_toml::Workspace>,
-    files: imbl::HashMap<lsp::Url, rope::Rope>,
+    toml: imbl::HashMap<std::path::PathBuf, nimbleparse_toml::Workspace>,
+    // FIXME figure out how to organize .l, .y, and inputs.
+    // For test inputs we also should figure out where pass/fail state is stored
+    //
+    // we need to store should_pass somewhere, either at directory or file level
+    // but it seems likely we just need to pass the result off to the client.
+    //
+    // This could also be some form of heirarchical hash where editor_files
+    // takes precedence over fs_files, and some metadata perhaps like:
+    // enum metadata { input({should_pass: bool}), yacc, lex, }
+    //
+    // Currently we just stuff all the things into a hashmaps which isn't ideal... *shrug*
+    editor_files: imbl::HashMap<lsp::Url, rope::Rope>,
+    fs_files: imbl::HashMap<std::path::PathBuf, rope::Rope>,
 }
 
-fn initialize_failed(reason: &'_ str) -> jsonrpc::Result<lsp::InitializeResult> {
+fn initialize_failed(reason: String) -> jsonrpc::Result<lsp::InitializeResult> {
     Err(tower_lsp::jsonrpc::Error {
         code: tower_lsp::jsonrpc::ErrorCode::ServerError(-32002),
         message: format!("Error during server initialization: {reason} "),
-
         data: None,
     })
 }
@@ -50,21 +60,130 @@ impl tower_lsp::LanguageServer for Backend {
 
         let caps = params.capabilities;
         if params.workspace_folders.is_none() || caps.workspace.is_none() {
-            initialize_failed("no known workspace")?;
+            initialize_failed("no known workspace".to_string())?;
         }
 
         let mut state = self.state.lock().await;
-        let paths = params.workspace_folders.unwrap();
-        let paths = paths
-            .iter()
-            .map(|folder| folder.uri.to_file_path().unwrap());
-        state.toml.extend(paths.map(|path| {
-            // We should probably fix this, to not be sync when we implement reloading the toml file on change...
-            let toml_file = std::fs::read_to_string(path.join("nimbleparse.toml")).unwrap();
-            let workspace: nimbleparse_toml::Workspace =
-                toml::de::from_slice(toml_file.as_bytes()).unwrap();
-            workspace
-        }));
+        // Read nimbleparse.toml
+        {
+            let paths = params.workspace_folders.unwrap();
+            let paths = paths
+                .iter()
+                .map(|folder| folder.uri.to_file_path().unwrap());
+            state.toml.extend(paths.map(|path| {
+                // We should probably fix this, to not be sync when we implement reloading the toml file on change...
+                let toml_file = std::fs::read_to_string(path.join("nimbleparse.toml")).unwrap();
+                let workspace: nimbleparse_toml::Workspace =
+                    toml::de::from_slice(toml_file.as_bytes()).unwrap();
+                (path, workspace)
+            }));
+        }
+
+        let mut extensions: imbl::HashSet<String> = imbl::HashSet::new();
+        // parser extension should be unique.
+        {
+            for (_workspace_path, workspace) in &state.toml {
+                for parser in &workspace.parsers {
+                    if !extensions.contains(&parser.extension) {
+                        extensions.insert(parser.extension.clone());
+                    } else {
+                        initialize_failed(format!(
+                            "parsers contains duplicate extension: {}",
+                            &parser.extension
+                        ))?;
+                    }
+                }
+            }
+        };
+
+        let mut test_dirs: imbl::HashMap<std::path::PathBuf, bool> = imbl::HashMap::new();
+        // test.dir should be unique.
+        {
+            for (workspace_path, workspace) in &state.toml {
+                for test in &workspace.tests {
+                    let previous_value =
+                        test_dirs.insert(workspace_path.join(&test.dir), test.pass);
+                    if previous_value.is_some() {
+                        initialize_failed(format!(
+                            "tests contains duplicate directory: {:?}",
+                            &test.dir
+                        ))?;
+                    }
+                }
+            }
+        };
+
+        // non-recursive walk over `test.dir/*.extension`,
+        // reading paths into state.fs_files.
+        {
+            for test_dir in test_dirs.keys() {
+                self.client
+                    .log_message(
+                        lsp::MessageType::LOG,
+                        format!("walking test dir: {}", test_dir.to_string_lossy()),
+                    )
+                    .await;
+                let dirs = tokio::fs::read_dir(test_dir).await;
+                match dirs {
+                    Ok(mut dirs) => loop {
+                        let entry = (&mut dirs).next_entry().await;
+                        match entry {
+                            Ok(entry) => match entry {
+                                Some(entry) => {
+                                    let fs_type = entry.file_type().await;
+                                    match fs_type {
+                                        Ok(fs_type) => {
+                                            if fs_type.is_file() {
+                                                let path = entry.path();
+                                                let ext = path.extension();
+                                                if let Some(ext) = ext {
+                                                    let ext = ext.to_string_lossy();
+                                                    if extensions.contains(ext.as_ref()) {
+                                                        let path = entry.path();
+                                                        let data = tokio::fs::read_to_string(&path)
+                                                            .await
+                                                            .unwrap();
+                                                        state
+                                                            .fs_files
+                                                            .insert(path, rope::Rope::from(data));
+                                                    } else {
+                                                        continue;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        Err(e) => {
+                                            initialize_failed(format!("filssystem error checking filetype of {:#?}: {} at {}:{}", entry, e, file!(), line!()))?;
+                                        }
+                                    }
+                                }
+                                None => {
+                                    break;
+                                }
+                            },
+                            Err(e) => {
+                                initialize_failed(format!(
+                                    "enumerating {}: {} at {}:{}",
+                                    test_dir.to_string_lossy(),
+                                    e,
+                                    file!(),
+                                    line!()
+                                ))?;
+                            }
+                        }
+                    },
+                    Err(e) => {
+                        initialize_failed(format!(
+                            "reading {}:  {} at {}:{}",
+                            test_dir.to_string_lossy(),
+                            e,
+                            file!(),
+                            line!()
+                        ))?;
+                    }
+                }
+            }
+        }
 
         Ok(lsp::InitializeResult {
             capabilities: lsp::ServerCapabilities {
@@ -82,7 +201,7 @@ impl tower_lsp::LanguageServer for Backend {
     async fn initialized(&self, _: lsp::InitializedParams) {
         let state = self.state.lock().await;
         let mut globs: Vec<lsp::Registration> = Vec::new();
-        for workspace in &state.toml {
+        for (_workspace_path, workspace) in &state.toml {
             for parser in &workspace.parsers {
                 let glob = format!("**/*{}", parser.extension);
                 let mut reg = serde_json::Map::new();
@@ -158,7 +277,7 @@ impl tower_lsp::LanguageServer for Backend {
     async fn did_change(&self, params: lsp::DidChangeTextDocumentParams) {
         let mut state = self.state.lock().await;
         let rope = state
-            .files
+            .editor_files
             .entry(params.text_document.uri)
             .or_insert(rope::Rope::from(""));
         for change in params.content_changes {
@@ -182,7 +301,7 @@ impl tower_lsp::LanguageServer for Backend {
         let mut state = self.state.lock().await;
         let rope = rope::Rope::from(params.text_document.text);
 
-        state.files.insert(url, rope);
+        state.editor_files.insert(url, rope);
         self.client
             .log_message(lsp::MessageType::LOG, "did_open")
             .await;
@@ -191,7 +310,7 @@ impl tower_lsp::LanguageServer for Backend {
     async fn did_close(&self, params: lsp::DidCloseTextDocumentParams) {
         let url = params.text_document.uri;
         let mut state = self.state.lock().await;
-        state.files.remove(&url);
+        state.editor_files.remove(&url);
         self.client
             .log_message(lsp::MessageType::LOG, "did_close")
             .await;
@@ -207,11 +326,15 @@ impl tower_lsp::LanguageServer for Backend {
                         .unwrap();
                     let rope = rope::Rope::from(data);
                     let mut state = self.state.lock().await;
-                    state.files.insert(url, rope);
+                    let path = url.to_file_path().unwrap();
+                    state.fs_files.insert(path, rope);
                 }
                 lsp::FileChangeType::DELETED => {
                     let mut state = self.state.lock().await;
-                    state.files.remove(&file_event.uri);
+
+                    state
+                        .fs_files
+                        .remove(&file_event.uri.to_file_path().unwrap());
                 }
                 _ => {}
             }
