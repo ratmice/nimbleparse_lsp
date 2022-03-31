@@ -16,6 +16,24 @@ enum ServerError {
     IO(#[from] std::io::Error),
 }
 
+#[derive(thiserror::Error, Debug)]
+enum InitErr {
+    #[error("Error walking project files: {s} {e}")]
+    FS { s: String, e: std::io::Error },
+    #[error("{0}")]
+    Msg(String),
+}
+
+impl From<InitErr> for jsonrpc::Error {
+    fn from(it: InitErr) -> jsonrpc::Error {
+        tower_lsp::jsonrpc::Error {
+            code: tower_lsp::jsonrpc::ErrorCode::ServerError(-32002),
+            message: format!("Error during server initialization: {}", it),
+            data: None,
+        }
+    }
+}
+
 #[derive(Debug)]
 struct Backend {
     state: tokio::sync::Mutex<State>,
@@ -41,11 +59,7 @@ struct State {
 }
 
 fn initialize_failed(reason: String) -> jsonrpc::Result<lsp::InitializeResult> {
-    Err(tower_lsp::jsonrpc::Error {
-        code: tower_lsp::jsonrpc::ErrorCode::ServerError(-32002),
-        message: format!("Error during server initialization: {reason} "),
-        data: None,
-    })
+    Err(InitErr::Msg(reason).into())
 }
 
 #[tower_lsp::async_trait]
@@ -80,9 +94,10 @@ impl tower_lsp::LanguageServer for Backend {
         }
 
         let mut extensions: imbl::HashSet<String> = imbl::HashSet::new();
-        // parser extension should be unique.
+        let mut test_dirs: imbl::HashMap<std::path::PathBuf, bool> = imbl::HashMap::new(); 
         {
-            for (_workspace_path, workspace) in &state.toml {
+            for (workspace_path, workspace) in &state.toml {
+                // parser extension should be unique.
                 for parser in &workspace.parsers {
                     if !extensions.contains(&parser.extension) {
                         extensions.insert(parser.extension.clone());
@@ -93,13 +108,7 @@ impl tower_lsp::LanguageServer for Backend {
                         ))?;
                     }
                 }
-            }
-        };
-
-        let mut test_dirs: imbl::HashMap<std::path::PathBuf, bool> = imbl::HashMap::new();
-        // test.dir should be unique.
-        {
-            for (workspace_path, workspace) in &state.toml {
+                // test.dir should be unique.
                 for test in &workspace.tests {
                     let previous_value =
                         test_dirs.insert(workspace_path.join(&test.dir), test.pass);
@@ -123,63 +132,44 @@ impl tower_lsp::LanguageServer for Backend {
                         format!("walking test dir: {}", test_dir.to_string_lossy()),
                     )
                     .await;
-                let dirs = tokio::fs::read_dir(test_dir).await;
-                match dirs {
-                    Ok(mut dirs) => loop {
-                        let entry = (&mut dirs).next_entry().await;
-                        match entry {
-                            Ok(entry) => match entry {
-                                Some(entry) => {
-                                    let fs_type = entry.file_type().await;
-                                    match fs_type {
-                                        Ok(fs_type) => {
-                                            if fs_type.is_file() {
-                                                let path = entry.path();
-                                                let ext = path.extension();
-                                                if let Some(ext) = ext {
-                                                    let ext = ext.to_string_lossy();
-                                                    if extensions.contains(ext.as_ref()) {
-                                                        let path = entry.path();
-                                                        let data = tokio::fs::read_to_string(&path)
-                                                            .await
-                                                            .unwrap();
-                                                        state
-                                                            .fs_files
-                                                            .insert(path, rope::Rope::from(data));
-                                                    } else {
-                                                        continue;
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        Err(e) => {
-                                            initialize_failed(format!("filssystem error checking filetype of {:#?}: {} at {}:{}", entry, e, file!(), line!()))?;
-                                        }
+                let mut dirs = tokio::fs::read_dir(test_dir)
+                    .await
+                    .map_err(|e| InitErr::FS {
+                        s: format!("walking directory {:?}", test_dir),
+                        e,
+                    })?;
+                loop {
+                    let entry = (&mut dirs).next_entry().await.map_err(|e| InitErr::FS {
+                        s: "getting dirent".to_string(),
+                        e,
+                    })?;
+                    match entry {
+                        Some(entry) => {
+                            let fs_type = entry.file_type().await.map_err(|e| InitErr::FS {
+                                s: "getting entry type ".to_string(),
+                                e,
+                            })?;
+                            if fs_type.is_file() {
+                                let path = entry.path();
+                                let ext = path.extension();
+                                if let Some(ext) = ext {
+                                    let ext = ext.to_string_lossy();
+                                    if extensions.contains(ext.as_ref()) {
+                                        let path = entry.path();
+                                        let data = tokio::fs::read_to_string(&path).await.map_err(
+                                            |e| InitErr::FS {
+                                                s: "reading".to_string(),
+                                                e,
+                                            },
+                                        )?;
+                                        state.fs_files.insert(path, rope::Rope::from(data));
                                     }
                                 }
-                                None => {
-                                    break;
-                                }
-                            },
-                            Err(e) => {
-                                initialize_failed(format!(
-                                    "enumerating {}: {} at {}:{}",
-                                    test_dir.to_string_lossy(),
-                                    e,
-                                    file!(),
-                                    line!()
-                                ))?;
                             }
                         }
-                    },
-                    Err(e) => {
-                        initialize_failed(format!(
-                            "reading {}:  {} at {}:{}",
-                            test_dir.to_string_lossy(),
-                            e,
-                            file!(),
-                            line!()
-                        ))?;
+                        None => {
+                            break;
+                        }
                     }
                 }
             }
