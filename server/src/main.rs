@@ -94,7 +94,7 @@ impl tower_lsp::LanguageServer for Backend {
         }
 
         let mut extensions: imbl::HashSet<String> = imbl::HashSet::new();
-        let mut test_dirs: imbl::HashMap<std::path::PathBuf, bool> = imbl::HashMap::new(); 
+        let mut test_dirs: imbl::HashMap<std::path::PathBuf, bool> = imbl::HashMap::new();
         {
             for (workspace_path, workspace) in &state.toml {
                 // parser extension should be unique.
@@ -124,51 +124,45 @@ impl tower_lsp::LanguageServer for Backend {
 
         // non-recursive walk over `test.dir/*.extension`,
         // reading paths into state.fs_files.
-        {
-            for test_dir in test_dirs.keys() {
-                self.client
-                    .log_message(
-                        lsp::MessageType::LOG,
-                        format!("walking test dir: {}", test_dir.to_string_lossy()),
-                    )
-                    .await;
-                let mut dirs = tokio::fs::read_dir(test_dir)
-                    .await
-                    .map_err(|e| InitErr::FS {
-                        s: format!("walking directory {:?}", test_dir),
-                        e,
-                    })?;
-                loop {
-                    let entry = (&mut dirs).next_entry().await.map_err(|e| InitErr::FS {
-                        s: "getting dirent".to_string(),
-                        e,
-                    })?;
-                    match entry {
-                        Some(entry) => {
-                            let fs_type = entry.file_type().await.map_err(|e| InitErr::FS {
-                                s: "getting entry type ".to_string(),
-                                e,
-                            })?;
-                            if fs_type.is_file() {
-                                let path = entry.path();
-                                let ext = path.extension();
-                                if let Some(ext) = ext {
-                                    let ext = ext.to_string_lossy();
-                                    if extensions.contains(ext.as_ref()) {
-                                        let path = entry.path();
-                                        let data = tokio::fs::read_to_string(&path).await.map_err(
-                                            |e| InitErr::FS {
-                                                s: "reading".to_string(),
-                                                e,
-                                            },
-                                        )?;
-                                        state.fs_files.insert(path, rope::Rope::from(data));
-                                    }
+        for test_dir in test_dirs.keys() {
+            self.client
+                .log_message(
+                    lsp::MessageType::LOG,
+                    format!("walking test dir: {}", test_dir.to_string_lossy()),
+                )
+                .await;
+
+            // This should not be an error but print a warning, then watching for its creation,
+            let mut dirs = tokio::fs::read_dir(test_dir)
+                .await
+                .map_err(|e| InitErr::FS {
+                    s: format!("walking directory {:?}", test_dir),
+                    e,
+                })?;
+
+            while let Some(entry) = (&mut dirs).next_entry().await.map_err(|e| InitErr::FS {
+                s: format!("while reading dir {}:", test_dir.display()),
+                e,
+            })? {
+                let fs_type = entry.file_type().await.map_err(|e| InitErr::FS {
+                    s: format!(
+                        "getting file_type of {}",
+                        std::path::PathBuf::from(entry.file_name()).display()
+                    ),
+                    e,
+                })?;
+                if fs_type.is_file() {
+                    if let Some(ext) = entry.path().extension() {
+                        let ext = ext.to_string_lossy();
+                        if extensions.contains(ext.as_ref()) {
+                            let path = entry.path();
+                            let data = tokio::fs::read_to_string(&path).await.map_err(|e| {
+                                InitErr::FS {
+                                    s: format!("reading file {}", path.display()),
+                                    e,
                                 }
-                            }
-                        }
-                        None => {
-                            break;
+                            })?;
+                            state.fs_files.insert(path, rope::Rope::from(data));
                         }
                     }
                 }
