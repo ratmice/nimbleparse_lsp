@@ -162,16 +162,22 @@ impl tower_lsp::LanguageServer for Backend {
         };
 
         let mut extensions: imbl::HashSet<String> = imbl::HashSet::new();
-        let mut test_dirs: imbl::HashMap<std::path::PathBuf, bool> = imbl::HashMap::new();
+        let mut test_dirs: imbl::HashMap<
+            std::path::PathBuf,
+            (lsp::Url, toml::Spanned<std::path::PathBuf>, bool),
+        > = imbl::HashMap::new();
+        let mut diagnostics: imbl::HashMap<lsp::Url, Vec<lsp::Diagnostic>> = imbl::HashMap::new();
         {
             for (workspace_path, workspace) in &state.toml {
+                let cfg_path = workspace_path.join("nimbleparse.toml");
                 let mut diags = Vec::new();
-                if let Ok(url) = lsp::Url::from_file_path(workspace_path.join("nimbleparse.toml")) {
+                if let Ok(url) = &lsp::Url::from_file_path(&cfg_path) {
                     // parser extension should be unique.
                     for parser in workspace.parsers.get_ref() {
                         if !extensions.contains(parser.extension.get_ref()) {
                             extensions.insert(parser.extension.get_ref().clone());
                         } else {
+                            // TODO get real positions from spans
                             let (_start, _end) = parser.extension.span();
                             let start_line = 1;
                             let start_character = 1;
@@ -201,12 +207,15 @@ impl tower_lsp::LanguageServer for Backend {
                     }
                     // test.dir should be unique.
                     for test in &workspace.tests {
-                        let previous_value =
-                            test_dirs.insert(workspace_path.join(test.dir.get_ref()), test.pass);
+                        let previous_value = test_dirs.insert(
+                            workspace_path.join(test.dir.get_ref()),
+                            (url.clone(), test.dir.clone(), test.pass),
+                        );
                         let _toml_rope =
                             state.fs_files.get(&workspace_path.join("nimbleparse.toml"));
 
                         if previous_value.is_some() {
+                            // TODO get real positions from spans
                             let (_start, _end) = test.dir.span();
                             let start_line = 3;
                             let start_character = 3;
@@ -234,7 +243,7 @@ impl tower_lsp::LanguageServer for Backend {
                             diags.push(diag);
                         }
                     }
-                    self.client.publish_diagnostics(url, diags, None).await;
+                    diagnostics.insert(url.clone(), diags);
                 };
             }
         };
@@ -250,7 +259,8 @@ impl tower_lsp::LanguageServer for Backend {
 
         // non-recursive walk over `test.dir/*.extension`,
         // reading paths into state.fs_files.
-        for test_dir in test_dirs.keys() {
+        for (test_dir, test_dir_data) in test_dirs {
+            let cfg_path = test_dir_data.0;
             self.client
                 .log_message(
                     lsp::MessageType::LOG,
@@ -258,7 +268,7 @@ impl tower_lsp::LanguageServer for Backend {
                 )
                 .await;
 
-            let result = tokio::fs::read_dir(test_dir).await;
+            let result = tokio::fs::read_dir(&test_dir).await;
             match result {
                 Ok(mut dirs) => loop {
                     let result = (&mut dirs).next_entry().await;
@@ -323,17 +333,41 @@ impl tower_lsp::LanguageServer for Backend {
                     }
                 },
                 Err(e) => {
-                    // FIXME this should be a diagnostic.
-                    // For that to work though we need to figure out which workspace this
-                    // test_dir comes from, add field or table I suppose.
-                    self.client
-                        .log_message(
-                            lsp::MessageType::ERROR,
-                            format!("in readdir for test dir '{}': {}", test_dir.display(), e),
-                        )
-                        .await
+                    let diags = diagnostics.get_mut(&cfg_path);
+                    if let Some(diags) = diags {
+                        let (_start, _end) = test_dir_data.1.span();
+                        // TODO get real positions from spans
+                        let start_line = 3;
+                        let start_character = 3;
+                        let end_line = 3;
+                        let end_character = 4;
+                        let diag = lsp::Diagnostic {
+                            range: lsp::Range {
+                                start: lsp::Position {
+                                    line: start_line,
+                                    character: start_character,
+                                },
+                                end: lsp::Position {
+                                    line: end_line,
+                                    character: end_character,
+                                },
+                            },
+                            severity: Some(lsp::DiagnosticSeverity::ERROR),
+                            source: Some("nimbleparse toml [parser]".to_string()),
+                            message: format!(
+                                "in readdir for test dir '{}': {}",
+                                test_dir.display(),
+                                e
+                            ),
+                            ..Default::default()
+                        };
+                        diags.push(diag);
+                    }
                 }
             };
+        }
+        for (cfg_path, diags) in diagnostics {
+            self.client.publish_diagnostics(cfg_path, diags, None).await;
         }
         self.client
             .log_message(lsp::MessageType::LOG, "initialized!")
