@@ -1,0 +1,21 @@
+[[parsers]]
+l_file = "src/foo.l"
+y_file = "src/foo.y"
+extension = ".foo"
+
+[[parsers]]
+l_file = "src/bar.l"
+y_file = "src/bar.y"
+extension = ".foo"
+
+[[tests]]
+dir = "tests"
+pass = true
+
+[[tests]]
+dir = "tests"
+pass = true
+
+[[tests]]
+dir = "nonexistent"
+pass = false
