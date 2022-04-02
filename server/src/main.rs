@@ -28,10 +28,23 @@ impl State {
     }
 }
 
-type Workspaces = imbl::HashMap<
-    std::path::PathBuf,
-    (std::path::PathBuf, nimbleparse_toml::Workspace, rope::Rope),
->;
+#[derive(Debug, Clone)]
+struct WorkspaceCfg {
+    workspace: nimbleparse_toml::Workspace,
+    toml_path: std::path::PathBuf,
+    toml_file: rope::Rope,
+}
+
+#[derive(Clone)]
+struct TestDir {
+    workspace_path: std::path::PathBuf,
+    toml_value: toml::Spanned<std::path::PathBuf>,
+    #[allow(unused)] // FIXME use
+    pass: bool,
+}
+
+type Workspaces = imbl::HashMap<std::path::PathBuf, WorkspaceCfg>;
+
 type UrlFiles = imbl::HashMap<lsp::Url, rope::Rope>;
 type PathFiles = imbl::HashMap<std::path::PathBuf, rope::Rope>;
 #[derive(Debug, Default)]
@@ -99,7 +112,11 @@ impl tower_lsp::LanguageServer for Backend {
                     toml::de::from_slice(toml_file.as_bytes()).unwrap();
                 (
                     workspace_path,
-                    (toml_path, workspace, rope::Rope::from(toml_file)),
+                    WorkspaceCfg {
+                        toml_path,
+                        workspace,
+                        toml_file: rope::Rope::from(toml_file),
+                    },
                 )
             }));
         }
@@ -121,7 +138,7 @@ impl tower_lsp::LanguageServer for Backend {
     async fn initialized(&self, _: lsp::InitializedParams) {
         let mut state = self.state.lock().await;
         let mut globs: Vec<lsp::Registration> = Vec::new();
-        for (_workspace_path, (_cfg_path, workspace, _rope)) in &state.toml {
+        for (_workspace_path, WorkspaceCfg { workspace, .. }) in &state.toml {
             for parser in workspace.parsers.get_ref() {
                 let glob = format!("**/*{}", parser.extension.get_ref());
                 let mut reg = serde_json::Map::new();
@@ -168,19 +185,19 @@ impl tower_lsp::LanguageServer for Backend {
         };
 
         let mut extensions: imbl::HashSet<String> = imbl::HashSet::new();
-        let mut test_dirs: imbl::HashMap<
-            std::path::PathBuf,
-            (
-                std::path::PathBuf,
-                std::path::PathBuf,
-                toml::Spanned<std::path::PathBuf>,
-                bool,
-            ),
-        > = imbl::HashMap::new();
+        let mut test_dirs: imbl::HashMap<std::path::PathBuf, TestDir> = imbl::HashMap::new();
         let mut diagnostics: imbl::HashMap<std::path::PathBuf, Vec<lsp::Diagnostic>> =
             imbl::HashMap::new();
         {
-            for (workspace_path, (cfg_path, workspace, cfg_rope)) in &state.toml {
+            for (
+                workspace_path,
+                WorkspaceCfg {
+                    toml_path,
+                    workspace,
+                    toml_file,
+                },
+            ) in &state.toml
+            {
                 let mut diags = Vec::new();
                 // parser extension should be unique.
                 for parser in workspace.parsers.get_ref() {
@@ -189,8 +206,8 @@ impl tower_lsp::LanguageServer for Backend {
                     } else {
                         // TODO get real positions from spans
                         let (start, end) = parser.extension.span();
-                        let start_line = cfg_rope.line_of_offset(start) as u32;
-                        let end_line = cfg_rope.line_of_offset(end) as u32;
+                        let start_line = toml_file.line_of_offset(start) as u32;
+                        let end_line = toml_file.line_of_offset(end) as u32;
                         let start_character = 0;
                         let end_character = 0;
                         let diag = lsp::Diagnostic {
@@ -219,19 +236,18 @@ impl tower_lsp::LanguageServer for Backend {
                 for test in &workspace.tests {
                     let previous_value = test_dirs.insert(
                         workspace_path.join(test.dir.get_ref()),
-                        (
-                            workspace_path.clone(),
-                            cfg_path.clone(),
-                            test.dir.clone(),
-                            test.pass,
-                        ),
+                        TestDir {
+                            workspace_path: workspace_path.clone(),
+                            toml_value: test.dir.clone(),
+                            pass: test.pass,
+                        },
                     );
 
                     if previous_value.is_some() {
                         // TODO get real positions from spans
                         let (start, end) = test.dir.span();
-                        let start_line = cfg_rope.line_of_offset(start) as u32;
-                        let end_line = cfg_rope.line_of_offset(end) as u32;
+                        let start_line = toml_file.line_of_offset(start) as u32;
+                        let end_line = toml_file.line_of_offset(end) as u32;
                         let start_character = 0;
                         let end_character = 0;
                         let diag = lsp::Diagnostic {
@@ -256,7 +272,7 @@ impl tower_lsp::LanguageServer for Backend {
                         diags.push(diag);
                     }
                 }
-                diagnostics.insert(cfg_path.clone(), diags);
+                diagnostics.insert(toml_path.clone(), diags);
             }
         };
 
@@ -272,9 +288,22 @@ impl tower_lsp::LanguageServer for Backend {
         // non-recursive walk over `test.dir/*.extension`,
         // reading paths into state.fs_files.
 
-        for (test_dir, (workspace_path, _cfg_path, spanned, _cfg_rope)) in test_dirs {
+        for (
+            test_dir,
+            TestDir {
+                workspace_path,
+                toml_value,
+                ..
+            },
+        ) in test_dirs
+        {
             let cfg = state.toml.get(&workspace_path);
-            if let Some((cfg_path, _, cfg_rope)) = cfg {
+            if let Some(WorkspaceCfg {
+                toml_path,
+                toml_file,
+                ..
+            }) = cfg
+            {
                 let result = tokio::fs::read_dir(&test_dir).await;
                 match result {
                     Ok(mut dirs) => loop {
@@ -340,11 +369,11 @@ impl tower_lsp::LanguageServer for Backend {
                         }
                     },
                     Err(e) => {
-                        let diags = diagnostics.get_mut(cfg_path);
+                        let diags = diagnostics.get_mut(toml_path);
                         if let Some(diags) = diags {
-                            let (start, end) = spanned.span();
-                            let start_line = cfg_rope.line_of_offset(start) as u32;
-                            let end_line = cfg_rope.line_of_offset(end) as u32;
+                            let (start, end) = toml_value.span();
+                            let start_line = toml_file.line_of_offset(start) as u32;
+                            let end_line = toml_file.line_of_offset(end) as u32;
                             let start_character = 0;
                             let end_character = 0;
                             let diag = lsp::Diagnostic {
