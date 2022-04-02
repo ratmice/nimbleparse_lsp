@@ -16,33 +16,24 @@ enum ServerError {
     IO(#[from] std::io::Error),
 }
 
-#[derive(thiserror::Error, Debug)]
-enum InitErr {
-    #[error("Error walking project files: {s} {e}")]
-    FS { s: String, e: std::io::Error },
-    #[error("{0}")]
-    Msg(String),
-}
-
-impl From<InitErr> for jsonrpc::Error {
-    fn from(it: InitErr) -> jsonrpc::Error {
-        tower_lsp::jsonrpc::Error {
-            code: tower_lsp::jsonrpc::ErrorCode::ServerError(-32002),
-            message: format!("Error during server initialization: {}", it),
-            data: None,
-        }
-    }
-}
-
 #[derive(Debug)]
 struct Backend {
     state: tokio::sync::Mutex<State>,
     client: tower_lsp::Client,
 }
 
+impl State {
+    fn mut_borrow(&mut self) -> (&mut Workspaces, &mut UrlFiles, &mut PathFiles) {
+        (&mut self.toml, &mut self.editor_files, &mut self.fs_files)
+    }
+}
+
+type Workspaces = imbl::HashMap<std::path::PathBuf, nimbleparse_toml::Workspace>;
+type UrlFiles = imbl::HashMap<lsp::Url, rope::Rope>;
+type PathFiles = imbl::HashMap<std::path::PathBuf, rope::Rope>;
 #[derive(Debug, Default)]
 struct State {
-    toml: imbl::HashMap<std::path::PathBuf, nimbleparse_toml::Workspace>,
+    toml: Workspaces,
     // FIXME figure out how to organize .l, .y, and inputs.
     // For test inputs we also should figure out where pass/fail state is stored
     //
@@ -54,12 +45,16 @@ struct State {
     // enum metadata { input({should_pass: bool}), yacc, lex, }
     //
     // Currently we just stuff all the things into a hashmaps which isn't ideal... *shrug*
-    editor_files: imbl::HashMap<lsp::Url, rope::Rope>,
-    fs_files: imbl::HashMap<std::path::PathBuf, rope::Rope>,
+    editor_files: UrlFiles,
+    fs_files: PathFiles,
 }
 
 fn initialize_failed(reason: String) -> jsonrpc::Result<lsp::InitializeResult> {
-    Err(InitErr::Msg(reason).into())
+    Err(tower_lsp::jsonrpc::Error {
+        code: tower_lsp::jsonrpc::ErrorCode::ServerError(-32002),
+        message: format!("Error during server initialization: {}", reason),
+        data: None,
+    })
 }
 
 #[tower_lsp::async_trait]
@@ -74,99 +69,33 @@ impl tower_lsp::LanguageServer for Backend {
 
         let caps = params.capabilities;
         if params.workspace_folders.is_none() || caps.workspace.is_none() {
-            initialize_failed("no known workspace".to_string())?;
+            initialize_failed("requires workspace & capabilities".to_string())?;
+        }
+
+        if !caps
+            .text_document
+            .map_or(false, |doc| doc.publish_diagnostics.is_some())
+        {
+            initialize_failed("requires diagnostics capabilities".to_string())?;
         }
 
         let mut state = self.state.lock().await;
+        let (toml, _, fs_files) = state.mut_borrow();
         // Read nimbleparse.toml
         {
             let paths = params.workspace_folders.unwrap();
             let paths = paths
                 .iter()
                 .map(|folder| folder.uri.to_file_path().unwrap());
-            state.toml.extend(paths.map(|path| {
+            toml.extend(paths.map(|path| {
+                let toml_path = path.join("nimbleparse.toml");
                 // We should probably fix this, to not be sync when we implement reloading the toml file on change...
-                let toml_file = std::fs::read_to_string(path.join("nimbleparse.toml")).unwrap();
+                let toml_file = std::fs::read_to_string(&toml_path).unwrap();
+                fs_files.insert(toml_path, rope::Rope::from(&toml_file));
                 let workspace: nimbleparse_toml::Workspace =
                     toml::de::from_slice(toml_file.as_bytes()).unwrap();
                 (path, workspace)
             }));
-        }
-
-        let mut extensions: imbl::HashSet<String> = imbl::HashSet::new();
-        let mut test_dirs: imbl::HashMap<std::path::PathBuf, bool> = imbl::HashMap::new();
-        {
-            for (workspace_path, workspace) in &state.toml {
-                // parser extension should be unique.
-                for parser in &workspace.parsers {
-                    if !extensions.contains(&parser.extension) {
-                        extensions.insert(parser.extension.clone());
-                    } else {
-                        initialize_failed(format!(
-                            "parsers contains duplicate extension: {}",
-                            &parser.extension
-                        ))?;
-                    }
-                }
-                // test.dir should be unique.
-                for test in &workspace.tests {
-                    let previous_value =
-                        test_dirs.insert(workspace_path.join(&test.dir), test.pass);
-                    if previous_value.is_some() {
-                        initialize_failed(format!(
-                            "tests contains duplicate directory: {:?}",
-                            &test.dir
-                        ))?;
-                    }
-                }
-            }
-        };
-
-        // non-recursive walk over `test.dir/*.extension`,
-        // reading paths into state.fs_files.
-        for test_dir in test_dirs.keys() {
-            self.client
-                .log_message(
-                    lsp::MessageType::LOG,
-                    format!("walking test dir: {}", test_dir.to_string_lossy()),
-                )
-                .await;
-
-            // This should not be an error but print a warning, then watching for its creation,
-            let mut dirs = tokio::fs::read_dir(test_dir)
-                .await
-                .map_err(|e| InitErr::FS {
-                    s: format!("walking directory {:?}", test_dir),
-                    e,
-                })?;
-
-            while let Some(entry) = (&mut dirs).next_entry().await.map_err(|e| InitErr::FS {
-                s: format!("while reading dir {}:", test_dir.display()),
-                e,
-            })? {
-                let fs_type = entry.file_type().await.map_err(|e| InitErr::FS {
-                    s: format!(
-                        "getting file_type of {}",
-                        std::path::PathBuf::from(entry.file_name()).display()
-                    ),
-                    e,
-                })?;
-                if fs_type.is_file() {
-                    if let Some(ext) = entry.path().extension() {
-                        let ext = ext.to_string_lossy();
-                        if extensions.contains(ext.as_ref()) {
-                            let path = entry.path();
-                            let data = tokio::fs::read_to_string(&path).await.map_err(|e| {
-                                InitErr::FS {
-                                    s: format!("reading file {}", path.display()),
-                                    e,
-                                }
-                            })?;
-                            state.fs_files.insert(path, rope::Rope::from(data));
-                        }
-                    }
-                }
-            }
         }
 
         Ok(lsp::InitializeResult {
@@ -176,6 +105,7 @@ impl tower_lsp::LanguageServer for Backend {
                 )),
                 hover_provider: Some(lsp::HoverProviderCapability::Simple(true)),
                 completion_provider: Some(lsp::CompletionOptions::default()),
+
                 ..Default::default()
             },
             ..Default::default()
@@ -183,11 +113,11 @@ impl tower_lsp::LanguageServer for Backend {
     }
 
     async fn initialized(&self, _: lsp::InitializedParams) {
-        let state = self.state.lock().await;
+        let mut state = self.state.lock().await;
         let mut globs: Vec<lsp::Registration> = Vec::new();
         for (_workspace_path, workspace) in &state.toml {
-            for parser in &workspace.parsers {
-                let glob = format!("**/*{}", parser.extension);
+            for parser in workspace.parsers.get_ref() {
+                let glob = format!("**/*{}", parser.extension.get_ref());
                 let mut reg = serde_json::Map::new();
                 reg.insert(
                     "globPattern".to_string(),
@@ -218,9 +148,193 @@ impl tower_lsp::LanguageServer for Backend {
          * rather than statically, I'm not sure of a good place we can register it besides here.
          * Unfortunately register_capability returns a result, and this notification cannot return one.
          */
+        if let Err(e) = self.client.register_capability(globs).await {
+            self.client
+                .log_message(
+                    lsp::MessageType::ERROR,
+                    format!(
+                        "registering for {}: {}",
+                        "workspace/didChangeWatchedFiles", e
+                    ),
+                )
+                .await;
+            panic!("{}", e);
+        };
 
-        self.client.register_capability(globs).await.unwrap();
+        let mut extensions: imbl::HashSet<String> = imbl::HashSet::new();
+        let mut test_dirs: imbl::HashMap<std::path::PathBuf, bool> = imbl::HashMap::new();
+        {
+            for (workspace_path, workspace) in &state.toml {
+                let mut diags = Vec::new();
+                if let Ok(url) = lsp::Url::from_file_path(workspace_path.join("nimbleparse.toml")) {
+                    // parser extension should be unique.
+                    for parser in workspace.parsers.get_ref() {
+                        if !extensions.contains(parser.extension.get_ref()) {
+                            extensions.insert(parser.extension.get_ref().clone());
+                        } else {
+                            let (_start, _end) = parser.extension.span();
+                            let start_line = 1;
+                            let start_character = 1;
+                            let end_line = 1;
+                            let end_character = 1;
+                            let diag = lsp::Diagnostic {
+                                range: lsp::Range {
+                                    start: lsp::Position {
+                                        line: start_line,
+                                        character: start_character,
+                                    },
+                                    end: lsp::Position {
+                                        line: end_line,
+                                        character: end_character,
+                                    },
+                                },
+                                severity: Some(lsp::DiagnosticSeverity::ERROR),
+                                source: Some("nimbleparse toml".to_string()),
+                                message: format!(
+                                    "multiple parsers for the same file extension: {}",
+                                    parser.extension.get_ref()
+                                ),
+                                ..Default::default()
+                            };
+                            diags.push(diag);
+                        }
+                    }
+                    // test.dir should be unique.
+                    for test in &workspace.tests {
+                        let previous_value =
+                            test_dirs.insert(workspace_path.join(test.dir.get_ref()), test.pass);
+                        let _toml_rope =
+                            state.fs_files.get(&workspace_path.join("nimbleparse.toml"));
 
+                        if previous_value.is_some() {
+                            let (_start, _end) = test.dir.span();
+                            let start_line = 3;
+                            let start_character = 3;
+                            let end_line = 3;
+                            let end_character = 4;
+                            let diag = lsp::Diagnostic {
+                                range: lsp::Range {
+                                    start: lsp::Position {
+                                        line: start_line,
+                                        character: start_character,
+                                    },
+                                    end: lsp::Position {
+                                        line: end_line,
+                                        character: end_character,
+                                    },
+                                },
+                                severity: Some(lsp::DiagnosticSeverity::ERROR),
+                                source: Some("nimbleparse toml [parser]".to_string()),
+                                message: format!(
+                                    "multiple instances of test dir: {}",
+                                    test.dir.get_ref().display()
+                                ),
+                                ..Default::default()
+                            };
+                            diags.push(diag);
+                        }
+                    }
+                    self.client.publish_diagnostics(url, diags, None).await;
+                };
+            }
+        };
+
+        // FIXME Extract this to a function for when file changes eventually.
+
+        // how unfortunate:
+        // stuff below needs to happen after the stuff above,
+        // stuff above needs to be able to display diagnostics,
+        // thus the above must go after initialize,
+        // this is the only place i see that really makes sense, unfortunately it returns unit.
+        // everything below returns Results, the end result is both hideous and tedious.
+
+        // non-recursive walk over `test.dir/*.extension`,
+        // reading paths into state.fs_files.
+        for test_dir in test_dirs.keys() {
+            self.client
+                .log_message(
+                    lsp::MessageType::LOG,
+                    format!("walking test dir: {}", test_dir.display()),
+                )
+                .await;
+
+            let result = tokio::fs::read_dir(test_dir).await;
+            match result {
+                Ok(mut dirs) => loop {
+                    let result = (&mut dirs).next_entry().await;
+                    match result {
+                        Ok(Some(entry)) => match entry.file_type().await {
+                            Ok(fs_type) => {
+                                if fs_type.is_file() {
+                                    if let Some(ext) = entry.path().extension() {
+                                        let ext = ext.to_string_lossy();
+                                        if extensions.contains(ext.as_ref()) {
+                                            let path = entry.path();
+                                            let result = tokio::fs::read_to_string(&path).await;
+                                            match result {
+                                                Ok(data) => {
+                                                    state
+                                                        .fs_files
+                                                        .insert(path, rope::Rope::from(data));
+                                                }
+                                                Err(e) => {
+                                                    self.client
+                                                        .log_message(
+                                                            lsp::MessageType::ERROR,
+                                                            format!(
+                                                                "reading file '{}':  {}",
+                                                                entry.path().display(),
+                                                                e
+                                                            ),
+                                                        )
+                                                        .await;
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                self.client.log_message(
+                                             lsp::MessageType::ERROR,
+                                             format!("getting file_type in directory '{}' for entry '{}':  {}", test_dir.display(), entry.path().display(), e),
+                                         )
+                                         .await;
+                                break;
+                            }
+                        },
+                        Ok(None) => {
+                            break;
+                        }
+                        Err(e) => {
+                            self.client
+                                .log_message(
+                                    lsp::MessageType::ERROR,
+                                    format!(
+                                        "While dir entries for '{}': {}",
+                                        test_dir.display(),
+                                        e
+                                    ),
+                                )
+                                .await;
+                            break;
+                        }
+                    }
+                },
+                Err(e) => {
+                    // FIXME this should be a diagnostic.
+                    // For that to work though we need to figure out which workspace this
+                    // test_dir comes from, add field or table I suppose.
+                    self.client
+                        .log_message(
+                            lsp::MessageType::ERROR,
+                            format!("in readdir for test dir '{}': {}", test_dir.display(), e),
+                        )
+                        .await
+                }
+            };
+        }
         self.client
             .log_message(lsp::MessageType::LOG, "initialized!")
             .await;

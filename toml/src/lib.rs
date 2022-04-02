@@ -3,20 +3,20 @@ use std::path::PathBuf;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Workspace {
-    pub parsers: Vec<Parser>,
+    pub parsers: toml::Spanned<Vec<Parser>>,
     pub tests: Vec<TestDir>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Parser {
-    pub l_file: PathBuf,
-    pub y_file: PathBuf,
-    pub extension: String,
+    pub l_file: toml::Spanned<PathBuf>,
+    pub y_file: toml::Spanned<PathBuf>,
+    pub extension: toml::Spanned<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct TestDir {
-    pub dir: PathBuf,
+    pub dir: toml::Spanned<PathBuf>,
     pub pass: bool,
 }
 
