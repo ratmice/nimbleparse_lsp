@@ -455,25 +455,41 @@ impl tower_lsp::LanguageServer for Backend {
 
     async fn did_change(&self, params: lsp::DidChangeTextDocumentParams) {
         let mut state = self.state.lock().await;
-        let rope = state
-            .editor_files
-            .entry(params.text_document.uri)
-            .or_insert(rope::Rope::from(""));
-        for change in params.content_changes {
-            if let Some(range) = change.range {
-                let line_start_pos = rope.offset_of_line(range.start.line as usize);
-                let line_end_pos = rope.offset_of_line(range.end.line as usize);
-                // FIXME multibyte characters...
-                let start = line_start_pos + range.start.character as usize;
-                let end = line_end_pos + range.end.character as usize;
-                rope.edit(start..end, change.text);
-            } else {
-                rope.edit(0..rope.len(), change.text);
+        let uri = params.text_document.uri;
+        let path = uri.to_file_path();
+        let nimbleparse_toml = std::ffi::OsStr::new("nimbleparse.toml");
+        match path {
+            Ok(path) if Some(nimbleparse_toml) == path.file_name() => {
+                self.client
+                    .show_message(
+                        lsp::MessageType::INFO,
+                        "Reload required for nimbleparse.toml changes to take effect",
+                    )
+                    .await;
+            }
+            _ => {
+                let rope = state
+                    .editor_files
+                    .entry(uri)
+                    .or_insert(rope::Rope::from(""));
+                for change in params.content_changes {
+                    if let Some(range) = change.range {
+                        let line_start_pos = rope.offset_of_line(range.start.line as usize);
+                        let line_end_pos = rope.offset_of_line(range.end.line as usize);
+                        // FIXME multibyte characters...
+                        let start = line_start_pos + range.start.character as usize;
+                        let end = line_end_pos + range.end.character as usize;
+                        rope.edit(start..end, change.text);
+                    } else {
+                        rope.edit(0..rope.len(), change.text);
+                    }
+                }
+
+                self.client
+                    .log_message(lsp::MessageType::LOG, format!("did_change: {}", rope))
+                    .await;
             }
         }
-        self.client
-            .log_message(lsp::MessageType::LOG, format!("did_change: {}", rope))
-            .await;
     }
 
     async fn did_open(&self, params: lsp::DidOpenTextDocumentParams) {

@@ -70,7 +70,7 @@ export function activate(context: vscode.ExtensionContext) {
     };
 
     let clientOptions: LanguageClientOptions = {
-        documentSelector: docSelector,
+        documentSelector: docSelector.concat([{pattern: "**/nimbleparse.toml"}]),
         outputChannel,
         revealOutputChannelOn: RevealOutputChannelOn.Info
     };
