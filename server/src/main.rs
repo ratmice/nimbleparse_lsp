@@ -63,6 +63,7 @@ struct State {
     // Currently we just stuff all the things into a hashmaps which isn't ideal... *shrug*
     editor_files: UrlFiles,
     fs_files: PathFiles,
+    warned_needs_restart: bool,
 }
 
 fn initialize_failed(reason: String) -> jsonrpc::Result<lsp::InitializeResult> {
@@ -460,12 +461,15 @@ impl tower_lsp::LanguageServer for Backend {
         let nimbleparse_toml = std::ffi::OsStr::new("nimbleparse.toml");
         match path {
             Ok(path) if Some(nimbleparse_toml) == path.file_name() => {
-                self.client
-                    .show_message(
-                        lsp::MessageType::INFO,
-                        "Reload required for nimbleparse.toml changes to take effect",
-                    )
-                    .await;
+                if !state.warned_needs_restart {
+                    self.client
+                        .show_message(
+                            lsp::MessageType::INFO,
+                            "Reload required for nimbleparse.toml changes to take effect",
+                        )
+                        .await;
+                    state.warned_needs_restart = true;
+                }
             }
             _ => {
                 let rope = state
