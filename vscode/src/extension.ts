@@ -43,12 +43,16 @@ export function activate(context: vscode.ExtensionContext) {
            folder: folder.uri.fsPath
         })
     );
-    var docSelector = tomls?.flatMap(
-        (toml) => toml.workspace.parsers.map(
-            (parser: Parser) => ({
-                 // assumes parser.extension includes leading '.'
-                 pattern: "**/*" + parser.extension
-            })
+    var dynSelector = tomls?.flatMap(
+        (toml) => toml.workspace.parsers.flatMap(
+            (parser: Parser) => ([{
+                    // assumes parser.extension includes leading '.'
+                    pattern: "**/*" + parser.extension
+            }, {
+                    pattern: toml.folder + '/' + parser.l_file
+            }, {
+                    pattern: toml.folder + '/' + parser.y_file
+            }])
         )
     );
 
@@ -68,9 +72,14 @@ export function activate(context: vscode.ExtensionContext) {
         run: lsp_exec,
         debug: lsp_exec
     };
+    let docSelector = [{pattern: "**/nimbleparse.toml"}];
+    if (!(dynSelector == null)) {
+        docSelector.concat(dynSelector);
+    }
 
+    outputChannel.appendLine(JSON.stringify(docSelector));
     let clientOptions: LanguageClientOptions = {
-        documentSelector: docSelector.concat([{pattern: "**/nimbleparse.toml"}]),
+        documentSelector: dynSelector,
         outputChannel,
         revealOutputChannelOn: RevealOutputChannelOn.Info
     };
