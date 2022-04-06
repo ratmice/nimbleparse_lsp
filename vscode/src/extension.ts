@@ -72,14 +72,13 @@ export function activate(context: vscode.ExtensionContext) {
         run: lsp_exec,
         debug: lsp_exec
     };
-    let docSelector = [{pattern: "**/nimbleparse.toml"}];
+    var docSelector = [{pattern: "**/nimbleparse.toml"}];
     if (!(dynSelector == null)) {
-        docSelector.concat(dynSelector);
+        docSelector = docSelector.concat(dynSelector);
     }
 
-    outputChannel.appendLine(JSON.stringify(docSelector));
     let clientOptions: LanguageClientOptions = {
-        documentSelector: dynSelector,
+        documentSelector: docSelector,
         outputChannel,
         revealOutputChannelOn: RevealOutputChannelOn.Info
     };
