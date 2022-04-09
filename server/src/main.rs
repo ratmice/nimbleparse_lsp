@@ -2,6 +2,11 @@ use tower_lsp::jsonrpc;
 use tower_lsp::lsp_types as lsp;
 use xi_rope as rope;
 
+use std::fmt;
+
+/* traits */
+use lrlex::LexerDef as _;
+
 #[derive(thiserror::Error, Debug)]
 enum ServerError {
     #[error("argument requires a path")]
@@ -16,6 +21,14 @@ enum ServerError {
     IO(#[from] std::io::Error),
 }
 
+#[derive(thiserror::Error, Debug)]
+enum LexError {
+    #[error("file not found: {0}")]
+    FileNotFound(std::path::PathBuf),
+    #[error("building lexer: {0}")]
+    LrLex(#[from] lrlex::LexBuildError),
+}
+
 #[derive(Debug)]
 struct Backend {
     state: tokio::sync::Mutex<State>,
@@ -23,8 +36,24 @@ struct Backend {
 }
 
 impl State {
-    fn mut_borrow(&mut self) -> (&mut Workspaces, &mut UrlFiles, &mut PathFiles) {
-        (&mut self.toml, &mut self.editor_files, &mut self.fs_files)
+    fn mut_borrow(
+        &mut self,
+    ) -> (
+        &mut Workspaces,
+        &mut UrlFiles,
+        &mut PathFiles,
+        &mut ByExtension,
+        &mut LexTable,
+        &mut ParseTables,
+    ) {
+        (
+            &mut self.toml,
+            &mut self.editor_files,
+            &mut self.fs_files,
+            &mut self.by_extension,
+            &mut self.lex_tables,
+            &mut self.parse_tables,
+        )
     }
 }
 
@@ -47,7 +76,21 @@ type Workspaces = imbl::HashMap<std::path::PathBuf, WorkspaceCfg>;
 
 type UrlFiles = imbl::HashMap<lsp::Url, rope::Rope>;
 type PathFiles = imbl::HashMap<std::path::PathBuf, rope::Rope>;
-#[derive(Debug, Default)]
+type ByExtension = imbl::HashMap<String, ParserFiles>;
+type LexTable = imbl::HashMap<
+    std::path::PathBuf,
+    std::sync::Arc<lrlex::LRNonStreamingLexerDef<lrlex::DefaultLexeme<u32>, u32>>,
+>;
+type ParseTables =
+    imbl::HashMap<std::path::PathBuf, (lrtable::StateGraph<u32>, lrtable::StateTable<u32>)>;
+
+#[derive(Debug, Clone)]
+struct ParserFiles {
+    l_file: std::path::PathBuf,
+    y_file: std::path::PathBuf,
+}
+
+#[derive(Default)]
 struct State {
     toml: Workspaces,
     // FIXME figure out how to organize .l, .y, and inputs.
@@ -63,7 +106,20 @@ struct State {
     // Currently we just stuff all the things into a hashmaps which isn't ideal... *shrug*
     editor_files: UrlFiles,
     fs_files: PathFiles,
+    by_extension: imbl::HashMap<String, ParserFiles>,
+    lex_tables: LexTable,
+    parse_tables: ParseTables,
     warned_needs_restart: bool,
+}
+
+impl fmt::Debug for State {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "toml: {:?}", self.toml)?;
+        write!(f, "editor_files: {:?}", self.editor_files)?;
+        write!(f, "fs_files: {:?}", self.editor_files)?;
+        write!(f, "by_extension: {:?}", self.by_extension)?;
+        write!(f, "warned_needs_restart: {:?}", self.warned_needs_restart)
+    }
 }
 
 fn initialize_failed(reason: String) -> jsonrpc::Result<lsp::InitializeResult> {
@@ -97,7 +153,7 @@ impl tower_lsp::LanguageServer for Backend {
         }
 
         let mut state = self.state.lock().await;
-        let (toml, _, fs_files) = state.mut_borrow();
+        let (toml, _, fs_files, _, _, _) = state.mut_borrow();
         // Read nimbleparse.toml
         {
             let paths = params.workspace_folders.unwrap();
@@ -185,11 +241,11 @@ impl tower_lsp::LanguageServer for Backend {
             panic!("{}", e);
         };
 
-        let mut extensions: imbl::HashSet<String> = imbl::HashSet::new();
         let mut test_dirs: imbl::HashMap<std::path::PathBuf, TestDir> = imbl::HashMap::new();
         let mut diagnostics: imbl::HashMap<std::path::PathBuf, Vec<lsp::Diagnostic>> =
             imbl::HashMap::new();
         {
+            let (toml, _, _, by_extension, _, _) = state.mut_borrow();
             for (
                 workspace_path,
                 WorkspaceCfg {
@@ -197,13 +253,17 @@ impl tower_lsp::LanguageServer for Backend {
                     workspace,
                     toml_file,
                 },
-            ) in &state.toml
+            ) in toml.iter()
             {
                 let mut diags = Vec::new();
                 // parser extension should be unique.
                 for parser in workspace.parsers.get_ref() {
-                    if !extensions.contains(parser.extension.get_ref()) {
-                        extensions.insert(parser.extension.get_ref().clone());
+                    if !by_extension.contains_key(parser.extension.get_ref()) {
+                        let parser_files = ParserFiles {
+                            l_file: parser.l_file.get_ref().to_path_buf(),
+                            y_file: parser.y_file.get_ref().to_path_buf(),
+                        };
+                        by_extension.insert(parser.extension.get_ref().clone(), parser_files);
                     } else {
                         // TODO get real positions from spans
                         let (start, end) = parser.extension.span();
@@ -298,7 +358,8 @@ impl tower_lsp::LanguageServer for Backend {
             },
         ) in test_dirs
         {
-            let cfg = state.toml.get(&workspace_path);
+            let (toml, _, fs_files, by_extension, _, _) = state.mut_borrow();
+            let cfg = toml.get(&workspace_path);
             if let Some(WorkspaceCfg {
                 toml_path,
                 toml_file,
@@ -315,13 +376,12 @@ impl tower_lsp::LanguageServer for Backend {
                                     if fs_type.is_file() {
                                         if let Some(ext) = entry.path().extension() {
                                             let ext = ext.to_string_lossy();
-                                            if extensions.contains(ext.as_ref()) {
+                                            if by_extension.contains_key(ext.as_ref()) {
                                                 let path = entry.path();
                                                 let result = tokio::fs::read_to_string(&path).await;
                                                 match result {
                                                     Ok(data) => {
-                                                        state
-                                                            .fs_files
+                                                        fs_files
                                                             .insert(path, rope::Rope::from(data));
                                                     }
                                                     Err(e) => {
@@ -402,6 +462,44 @@ impl tower_lsp::LanguageServer for Backend {
                     }
                 }
             };
+        }
+        // construct lex/parsing tables.
+        {
+            let (toml, editor_files, fs_files, _, lex_tables, _parse_tables) = state.mut_borrow();
+            for (_, WorkspaceCfg { workspace, .. }) in toml.iter() {
+                for parser in workspace.parsers.get_ref() {
+                    let lex_path = parser.l_file.get_ref();
+                    let lex_url = lsp::Url::from_file_path(lex_path).unwrap();
+                    let lex_contents = editor_files.get(&lex_url);
+                    let lex = if let Some(lex_contents) = lex_contents {
+                        // lex file edited/open in editor.
+                        lrlex::LRNonStreamingLexerDef::<lrlex::DefaultLexeme<u32>, u32>::from_str(
+                            &lex_contents.to_string(),
+                        )
+                        .map_err(LexError::LrLex)
+                    } else {
+                        let lex_contents = fs_files.get(lex_path);
+                        if let Some(lex_contents) = lex_contents {
+                            // lex file from filesystem
+                            lrlex::LRNonStreamingLexerDef::<lrlex::DefaultLexeme<u32>, u32>::from_str(
+                                &lex_contents.to_string(),
+                            )
+                            .map_err(LexError::LrLex)
+                        } else {
+                            // cannot find file...
+                            Err(LexError::FileNotFound(lex_path.clone()))
+                        }
+                    };
+                    match lex {
+                        Ok(lex) => {
+                            let _ = lex_tables.insert(lex_path.clone(), std::sync::Arc::new(lex));
+                        }
+                        Err(_e) => {
+                            // Print some diagnostic.
+                        }
+                    };
+                }
+            }
         }
         for (cfg_path, diags) in diagnostics {
             let url = lsp::Url::from_file_path(cfg_path.clone());

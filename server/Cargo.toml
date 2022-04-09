@@ -16,3 +16,8 @@ serde-transcode = "1.1.1"
 serde_json = { version = "1.0.79", features=["preserve_order"]}
 imbl = "1.0.1"
 xi-rope = "0.3.0"
+cfgrammar = "0.11.1"
+lrpar = "0.11.1"
+lrlex = "0.11.1"
+lrtable = "0.11.1"
+num-traits = "0.2.14"

@@ -1,6 +1,7 @@
+use cfgrammar::yacc::{YaccKind, YaccOriginalActionKind};
+use lrpar::parser::RecoveryKind;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use cfgrammar::yacc::{YaccKind, YaccOriginalActionKind};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Workspace {
@@ -17,10 +18,16 @@ pub struct Parser {
     // So it doesn't play nice with
     #[serde(default = "default_yacc_kind")]
     pub yacc_kind: YaccKind,
+    #[serde(default = "default_recovery_kind")]
+    pub recovery: RecoveryKind,
 }
 
 fn default_yacc_kind() -> YaccKind {
     YaccKind::Original(YaccOriginalActionKind::GenericParseTree)
+}
+
+fn default_recovery_kind() -> RecoveryKind {
+    RecoveryKind::CPCTPlus
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
