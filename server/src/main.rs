@@ -1,3 +1,4 @@
+//use imbl::vector::rayon::ParIter;
 use tower_lsp::jsonrpc;
 use tower_lsp::lsp_types as lsp;
 use xi_rope as rope;
@@ -22,11 +23,17 @@ enum ServerError {
 }
 
 #[derive(thiserror::Error, Debug)]
-enum LexError {
-    #[error("file not found: {0}")]
-    FileNotFound(std::path::PathBuf),
+enum ParseTableError {
+    #[error("lex file not found: {0}")]
+    LexFileNotFound(std::path::PathBuf),
+    #[error("yacc file not found: {0}")]
+    YaccFileNotFound(std::path::PathBuf),
     #[error("building lexer: {0}")]
     LrLex(#[from] lrlex::LexBuildError),
+    #[error("building parse tables: {0}")]
+    LrTable(#[from] lrtable::StateTableError<u32>),
+    #[error("yacc grammar error: {0}")]
+    CfGrammar(#[from] cfgrammar::yacc::grammar::YaccGrammarError),
 }
 
 #[derive(Debug)]
@@ -82,7 +89,7 @@ type LexTable = imbl::HashMap<
     std::sync::Arc<lrlex::LRNonStreamingLexerDef<lrlex::DefaultLexeme<u32>, u32>>,
 >;
 type ParseTables =
-    imbl::HashMap<std::path::PathBuf, (lrtable::StateGraph<u32>, lrtable::StateTable<u32>)>;
+    imbl::HashMap<std::path::PathBuf, std::sync::Arc<(lrtable::StateGraph<u32>, lrtable::StateTable<u32>)>>;
 
 #[derive(Debug, Clone)]
 struct ParserFiles {
@@ -465,32 +472,71 @@ impl tower_lsp::LanguageServer for Backend {
         }
         // construct lex/parsing tables.
         {
-            let (toml, editor_files, fs_files, _, lex_tables, _parse_tables) = state.mut_borrow();
+            let (toml, editor_files, fs_files, _, lex_tables, yacc_tables) = state.mut_borrow();
             for (_, WorkspaceCfg { workspace, .. }) in toml.iter() {
                 for parser in workspace.parsers.get_ref() {
                     let lex_path = parser.l_file.get_ref();
-                    let lex_url = lsp::Url::from_file_path(lex_path).unwrap();
-                    let lex_contents = editor_files.get(&lex_url);
-                    let lex = if let Some(lex_contents) = lex_contents {
-                        // lex file edited/open in editor.
-                        lrlex::LRNonStreamingLexerDef::<lrlex::DefaultLexeme<u32>, u32>::from_str(
-                            &lex_contents.to_string(),
-                        )
-                        .map_err(LexError::LrLex)
-                    } else {
-                        let lex_contents = fs_files.get(lex_path);
+                    let yacc_path = parser.y_file.get_ref();
+                    let lex_table = {
+                        let lex_url = lsp::Url::from_file_path(lex_path).unwrap();
+                        let lex_contents = editor_files.get(&lex_url);
                         if let Some(lex_contents) = lex_contents {
-                            // lex file from filesystem
+                            // lex file edited/open in editor.
                             lrlex::LRNonStreamingLexerDef::<lrlex::DefaultLexeme<u32>, u32>::from_str(
                                 &lex_contents.to_string(),
                             )
-                            .map_err(LexError::LrLex)
+                            .map_err(ParseTableError::LrLex)
                         } else {
-                            // cannot find file...
-                            Err(LexError::FileNotFound(lex_path.clone()))
+                            let lex_contents = fs_files.get(lex_path);
+                            if let Some(lex_contents) = lex_contents {
+                                // lex file from filesystem
+                                lrlex::LRNonStreamingLexerDef::<lrlex::DefaultLexeme<u32>, u32>::from_str(
+                                    &lex_contents.to_string(),
+                                )
+                                .map_err(ParseTableError::LrLex)
+                            } else {
+                                // cannot find file...
+                                Err(ParseTableError::LexFileNotFound(lex_path.clone()))
+                            }
                         }
                     };
-                    match lex {
+
+                    let yacc_table = {
+                        let yacc_url = lsp::Url::from_file_path(yacc_path).unwrap();
+                        let yacc_contents = editor_files.get(&yacc_url);
+
+                        if let Some(yacc_contents) = yacc_contents {
+                            // yacc file edited/open in editor.
+                            let grm = cfgrammar::yacc::YaccGrammar::new(
+                                parser.yacc_kind,
+                                &yacc_contents.to_string(),
+                            );
+                            match grm {
+                                Ok(grm) => lrtable::from_yacc(&grm, lrtable::Minimiser::Pager)
+                                    .map_err(ParseTableError::LrTable),
+                                Err(e) => Err(ParseTableError::CfGrammar(e)),
+                            }
+                        } else {
+                            let yacc_contents = fs_files.get(yacc_path);
+                            if let Some(yacc_contents) = yacc_contents {
+                                // yacc file from filesystem
+                                let grm = cfgrammar::yacc::YaccGrammar::new(
+                                    parser.yacc_kind,
+                                    &yacc_contents.to_string(),
+                                );
+                                match grm {
+                                    Ok(grm) => lrtable::from_yacc(&grm, lrtable::Minimiser::Pager)
+                                        .map_err(ParseTableError::LrTable),
+                                    Err(e) => Err(ParseTableError::CfGrammar(e)),
+                                }
+                            } else {
+                                // cannot find file...
+                                Err(ParseTableError::YaccFileNotFound(lex_path.clone()))
+                            }
+                        }
+                    };
+                    //let grm = if let Some()
+                    match lex_table {
                         Ok(lex) => {
                             let _ = lex_tables.insert(lex_path.clone(), std::sync::Arc::new(lex));
                         }
@@ -498,6 +544,14 @@ impl tower_lsp::LanguageServer for Backend {
                             // Print some diagnostic.
                         }
                     };
+                    match yacc_table {
+                        Ok(yacc) => {
+                            let _ = yacc_tables.insert(yacc_path.clone(), std::sync::Arc::new(yacc));
+                        }
+                        Err(_e) => {
+                            // Print some diagnostic.
+                        }
+                    }
                 }
             }
         }

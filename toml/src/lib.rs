@@ -1,4 +1,3 @@
-use cfgrammar::yacc::{YaccKind, YaccOriginalActionKind};
 use lrpar::parser::RecoveryKind;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -17,13 +16,13 @@ pub struct Parser {
     // Spanned doesn't have a public constructor
     // So it doesn't play nice with
     #[serde(default = "default_yacc_kind")]
-    pub yacc_kind: YaccKind,
+    pub yacc_kind: cfgrammar::yacc::YaccKind,
     #[serde(default = "default_recovery_kind")]
     pub recovery: RecoveryKind,
 }
 
-fn default_yacc_kind() -> YaccKind {
-    YaccKind::Original(YaccOriginalActionKind::GenericParseTree)
+fn default_yacc_kind() -> cfgrammar::yacc::YaccKind {
+    cfgrammar::yacc::YaccKind::Original(cfgrammar::yacc::YaccOriginalActionKind::GenericParseTree)
 }
 
 fn default_recovery_kind() -> RecoveryKind {

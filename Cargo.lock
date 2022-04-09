@@ -103,20 +103,7 @@ checksum = "baf1de4339761588bc0619e3cbc0120ee582ebb74b53b4efbf79117bd2da40fd"
 [[package]]
 name = "cfgrammar"
 version = "0.11.1"
-dependencies = [
- "indexmap",
- "lazy_static",
- "num-traits",
- "regex",
- "serde",
- "vob",
-]
-
-[[package]]
-name = "cfgrammar"
-version = "0.11.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "484386033b5127f42ac3afcc0ea6fca7ae35a5c2c6000a7f82c92fd767d49d1e"
+source = "git+https://github.com/softdevteam/grmtools#b8fa5404531c36f242f676320f72e755cfd00644"
 dependencies = [
  "indexmap",
  "lazy_static",
@@ -392,87 +379,50 @@ dependencies = [
 [[package]]
 name = "lrlex"
 version = "0.11.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "141b6269c1cde1151568b021aca62c6bcff9b0d01fa2fecde02083d359db3b17"
+source = "git+https://github.com/softdevteam/grmtools#b8fa5404531c36f242f676320f72e755cfd00644"
 dependencies = [
  "getopts",
  "lazy_static",
- "lrpar 0.11.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "lrpar",
  "num-traits",
  "regex",
  "serde",
  "try_from",
- "vergen 5.1.17",
+ "vergen",
 ]
 
 [[package]]
 name = "lrpar"
 version = "0.11.1"
+source = "git+https://github.com/softdevteam/grmtools#b8fa5404531c36f242f676320f72e755cfd00644"
 dependencies = [
  "bincode",
  "cactus",
- "cfgrammar 0.11.1",
+ "cfgrammar",
  "filetime",
  "indexmap",
  "lazy_static",
- "lrtable 0.11.1",
+ "lrtable",
  "num-traits",
  "packedvec",
  "regex",
  "serde",
  "static_assertions",
- "vergen 6.0.2",
- "vob",
-]
-
-[[package]]
-name = "lrpar"
-version = "0.11.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6226a0fcf65e1584eedad64dde743056341dd945611ce43b095bfca8649e8ce9"
-dependencies = [
- "bincode",
- "cactus",
- "cfgrammar 0.11.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "filetime",
- "indexmap",
- "lazy_static",
- "lrtable 0.11.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "num-traits",
- "packedvec",
- "regex",
- "serde",
- "static_assertions",
- "vergen 5.1.17",
+ "vergen",
  "vob",
 ]
 
 [[package]]
 name = "lrtable"
 version = "0.11.1"
+source = "git+https://github.com/softdevteam/grmtools#b8fa5404531c36f242f676320f72e755cfd00644"
 dependencies = [
- "cfgrammar 0.11.1",
+ "cfgrammar",
  "fnv",
  "num-traits",
  "serde",
  "sparsevec",
  "static_assertions",
- "vob",
-]
-
-[[package]]
-name = "lrtable"
-version = "0.11.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5a5d3e5d1d18adc715f52c4da33715bbd740080cecb3e66582b126cdc7074ef7"
-dependencies = [
- "cfgrammar 0.11.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "fnv",
- "num-traits",
- "serde",
- "sparsevec",
- "static_assertions",
- "try_from",
  "vob",
 ]
 
@@ -528,12 +478,12 @@ dependencies = [
 name = "nimbleparse_lsp"
 version = "0.1.0"
 dependencies = [
- "cfgrammar 0.11.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "cfgrammar",
  "imbl",
  "log",
  "lrlex",
- "lrpar 0.11.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "lrtable 0.11.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "lrpar",
+ "lrtable",
  "nimbleparse_toml",
  "num-traits",
  "serde-transcode",
@@ -549,8 +499,8 @@ dependencies = [
 name = "nimbleparse_toml"
 version = "0.1.0"
 dependencies = [
- "cfgrammar 0.11.1",
- "lrpar 0.11.1",
+ "cfgrammar",
+ "lrpar",
  "serde",
  "serde_json",
  "toml",
@@ -1175,21 +1125,6 @@ dependencies = [
  "matches",
  "percent-encoding",
  "serde",
-]
-
-[[package]]
-name = "vergen"
-version = "5.1.17"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6cf88d94e969e7956d924ba70741316796177fa0c79a2c9f4ab04998d96e966e"
-dependencies = [
- "anyhow",
- "cfg-if 1.0.0",
- "chrono",
- "enum-iterator",
- "getset",
- "rustversion",
- "thiserror",
 ]
 
 [[package]]
