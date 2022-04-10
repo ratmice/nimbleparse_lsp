@@ -263,6 +263,7 @@ struct FileState {
     fs_files: PathFiles,
     by_extension: imbl::HashMap<String, ParserInfo>,
     warned_needs_restart: bool,
+    client_monitor: bool,
 }
 
 #[derive(Default)]
@@ -296,6 +297,12 @@ impl tower_lsp::LanguageServer for Backend {
             .await;
 
         let caps = params.capabilities;
+        self.client
+            .log_message(
+                lsp::MessageType::ERROR,
+                format!("workspace caps: {:?}", &caps.workspace),
+            )
+            .await;
         if params.workspace_folders.is_none() || caps.workspace.is_none() {
             initialize_failed("requires workspace & capabilities".to_string())?;
         }
@@ -308,6 +315,15 @@ impl tower_lsp::LanguageServer for Backend {
         }
 
         let mut state = self.state.lock().await;
+
+        // vscode only supports dynamic_registration
+        // neovim supports neither dynamic or static registration of this yet.
+        state.client_monitor = caps.workspace.map_or(false, |wrk| {
+            wrk.did_change_watched_files.map_or(false, |dynamic| {
+                dynamic.dynamic_registration.unwrap_or(false)
+            })
+        });
+
         let (toml, _, fs_files, _) = state.mut_borrow();
         // Read nimbleparse.toml
         {
@@ -364,51 +380,55 @@ impl tower_lsp::LanguageServer for Backend {
     async fn initialized(&self, _: lsp::InitializedParams) {
         let mut state = self.state.lock().await;
         let mut globs: Vec<lsp::Registration> = Vec::new();
-        for (_workspace_path, WorkspaceCfg { workspace, .. }) in &state.toml {
-            for parser in workspace.parsers.get_ref() {
-                let glob = format!("**/*{}", parser.extension.get_ref());
-                let mut reg = serde_json::Map::new();
-                reg.insert(
-                    "globPattern".to_string(),
-                    serde_json::value::Value::String(glob),
-                );
-                let mut watchers = serde_json::Map::new();
-                let blah = vec![serde_json::value::Value::Object(reg)];
-                watchers.insert(
-                    "watchers".to_string(),
-                    serde_json::value::Value::Array(blah),
-                );
+        if state.client_monitor {
+            for (_workspace_path, WorkspaceCfg { workspace, .. }) in &state.toml {
+                for parser in workspace.parsers.get_ref() {
+                    let glob = format!("**/*{}", parser.extension.get_ref());
+                    let mut reg = serde_json::Map::new();
+                    reg.insert(
+                        "globPattern".to_string(),
+                        serde_json::value::Value::String(glob),
+                    );
+                    let mut watchers = serde_json::Map::new();
+                    let blah = vec![serde_json::value::Value::Object(reg)];
+                    watchers.insert(
+                        "watchers".to_string(),
+                        serde_json::value::Value::Array(blah),
+                    );
 
-                globs.push(lsp::Registration {
-                    id: "1".to_string(),
-                    method: "workspace/didChangeWatchedFiles".to_string(),
-                    register_options: Some(serde_json::value::Value::Object(watchers)),
-                });
+                    globs.push(lsp::Registration {
+                        id: "1".to_string(),
+                        method: "workspace/didChangeWatchedFiles".to_string(),
+                        register_options: Some(serde_json::value::Value::Object(watchers)),
+                    });
+                }
             }
+            self.client
+                .log_message(
+                    lsp::MessageType::LOG,
+                    format!("registering! {:?}", globs.clone()),
+                )
+                .await;
         }
-        self.client
-            .log_message(
-                lsp::MessageType::LOG,
-                format!("registering! {:?}", globs.clone()),
-            )
-            .await;
 
         /* The lsp_types and lsp specification documentation say to register this dynamically
          * rather than statically, I'm not sure of a good place we can register it besides here.
          * Unfortunately register_capability returns a result, and this notification cannot return one.
          */
-        if let Err(e) = self.client.register_capability(globs).await {
-            self.client
-                .log_message(
-                    lsp::MessageType::ERROR,
-                    format!(
-                        "registering for {}: {}",
-                        "workspace/didChangeWatchedFiles", e
-                    ),
-                )
-                .await;
-            panic!("{}", e);
-        };
+        if state.client_monitor {
+            if let Err(e) = self.client.register_capability(globs).await {
+                self.client
+                    .log_message(
+                        lsp::MessageType::ERROR,
+                        format!(
+                            "registering for {}: {}",
+                            "workspace/didChangeWatchedFiles", e
+                        ),
+                    )
+                    .await;
+                panic!("{}", e);
+            }
+        }
 
         let mut test_dirs: imbl::HashMap<std::path::PathBuf, TestDir> = imbl::HashMap::new();
         let mut diagnostics: imbl::HashMap<std::path::PathBuf, Vec<lsp::Diagnostic>> =
