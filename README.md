@@ -6,9 +6,9 @@ but an extension which gets discovered from a workspace.
 This  requires some amount of support from the editor.
 
 
-| Editor  | supported | excuse                                                  |
-| ------- | ----------|-------------------------------------------------------- |
-| neovim  |           | not obvious how to dynamically register file extensions |
+| Editor  | supported | caveats |
+| ------- | ----------|------------------------------------------------------------- |
+| neovim  |           | requires manual config, no dynamically registered extensions |
 | vscode  | :heavy_check_mark: | |
 
 ## Configuration
@@ -27,13 +27,21 @@ dir = "tests/fail"
 pass = false
 ```
 
-## Install
+## VSCode Install
 
 After installing prerequisites
 
 ```
 cargo run --bin xtask -- install
 ```
+
+## Neovim Install
+
+```
+cargo install --path server
+````
+Then follow the configuration in [neovim/](neovim/README.md) 
+
 
 ## Prerequisites
 This is perhaps incomplete, you'll need at least `vscode`, `npm`, `vsce`
