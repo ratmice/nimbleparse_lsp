@@ -63,6 +63,7 @@ impl Backend {
             y_file,
             l_file,
             recovery_kind,
+            yacc_kind,
         }) = state.by_extension.get(extension)
         {
             let lex_stuff = parse_state.lex_tables.get(l_file);
@@ -88,9 +89,24 @@ impl Backend {
                             == Some(extension.into())
                         {
                             let input = value.to_string();
+                            let now = std::time::Instant::now();
                             let lexer = lex_stuff.lexer(&input);
-                            let (pt, errors) = pb.parse_generictree(&lexer);
-                            results.push((key.to_file_path().unwrap(), pt, errors))
+                            let (pt, errors) = match yacc_kind {
+                                cfgrammar::yacc::YaccKind::Original(
+                                    cfgrammar::yacc::YaccOriginalActionKind::NoAction,
+                                ) => (None, pb.parse_noaction(&lexer)),
+
+                                cfgrammar::yacc::YaccKind::Original(
+                                    cfgrammar::yacc::YaccOriginalActionKind::GenericParseTree,
+                                ) => {
+                                    let (pt, errors) = pb.parse_generictree(&lexer);
+                                    (Some(pt), errors)
+                                }
+                                _ => {
+                                    panic!("YaccKind {:?} for nimbleparse_lsp", yacc_kind)
+                                }
+                            };
+                            results.push((key.to_file_path().unwrap(), pt, errors, now.elapsed()))
                         }
                     }
 
@@ -99,9 +115,25 @@ impl Backend {
                             == Some(extension.into())
                         {
                             let input = value.to_string();
+                            let now = std::time::Instant::now();
                             let lexer = lex_stuff.lexer(&input);
-                            let (pt, errors) = pb.parse_generictree(&lexer);
-                            results.push((path.to_owned(), pt, errors))
+                            let (pt, errors) = match yacc_kind {
+                                cfgrammar::yacc::YaccKind::Original(
+                                    cfgrammar::yacc::YaccOriginalActionKind::NoAction,
+                                ) => (None, pb.parse_noaction(&lexer)),
+
+                                cfgrammar::yacc::YaccKind::Original(
+                                    cfgrammar::yacc::YaccOriginalActionKind::GenericParseTree,
+                                ) => {
+                                    let (pt, errors) = pb.parse_generictree(&lexer);
+                                    (Some(pt), errors)
+                                }
+                                _ => {
+                                    panic!("YaccKind {:?} for nimbleparse_lsp", yacc_kind)
+                                }
+                            };
+
+                            results.push((path.to_owned(), pt, errors, now.elapsed()))
                         }
                     }
                 } else {
@@ -116,23 +148,38 @@ impl Backend {
                 self.client
                     .log_message(
                         lsp::MessageType::ERROR,
-                        format!("error finding lex file contents: {}", l_file.display()),
+                        format!(
+                            "error finding lex file contents: {} (entries: {})",
+                            l_file.display(),
+                            parse_state.lex_tables.len()
+                        ),
                     )
                     .await;
+                for key in parse_state.lex_tables.keys() {
+                    self.client
+                        .log_message(lsp::MessageType::ERROR, format!("key: {}", key.display()))
+                        .await;
+                }
             }
 
-            for (path, pt, errors) in results {
+            for (path, parse_tree, errors, time) in results {
                 self.client
                     .log_message(
                         lsp::MessageType::INFO,
-                        format!("parsed: {} to {:?} errors {:?}", path.display(), pt, errors),
+                        format!(
+                            "parsed: {:?} {} to: {:?} errors {:?}",
+                            time,
+                            path.display(),
+                            parse_tree,
+                            errors
+                        ),
                     )
                     .await;
             }
         }
     }
 
-    async fn build_lex_stuff(&self, path: &std::path::Path, contents: &str) {
+    async fn build_lex(&self, parser_info: &ParserInfo, contents: &str) -> bool {
         let mut parse_state = self.parse_state.lock().await;
         let lex_table =
             lrlex::LRNonStreamingLexerDef::<lrlex::DefaultLexeme<u32>, u32>::from_str(contents)
@@ -142,36 +189,44 @@ impl Backend {
             Ok(lex) => {
                 let _ = parse_state
                     .lex_tables
-                    .insert(path.to_owned(), std::sync::Arc::new(lex));
+                    .insert(parser_info.l_file.clone(), std::sync::Arc::new(lex));
+                true
             }
             Err(_e) => {
+                let _ = parse_state.lex_tables.remove(&parser_info.l_file);
+                let _ = parse_state.parse_tables.remove(&parser_info.y_file);
                 self.client
-                    .log_message(lsp::MessageType::ERROR, "building lexer")
+                    .log_message(
+                        lsp::MessageType::ERROR,
+                        "error building lexer, removed stale instances of parser and lexer",
+                    )
                     .await;
+                false
             }
-        };
+        }
     }
 
-    async fn build_yacc_stuff(
-        &self,
-        path: &std::path::Path,
-        yacc_kind: cfgrammar::yacc::YaccKind,
-        _recovery_kind: lrpar::RecoveryKind,
-        contents: &str,
-    ) {
+    async fn build_stuff(&self, parser_info: &ParserInfo, lex_contents: &str, yacc_contents: &str) {
+        {
+            if !self.build_lex(parser_info, lex_contents).await {
+                return;
+            }
+        }
         let mut parse_state = self.parse_state.lock().await;
-        let grm = cfgrammar::yacc::YaccGrammar::new(yacc_kind, contents);
+        let grm = cfgrammar::yacc::YaccGrammar::new(parser_info.yacc_kind, yacc_contents);
         match grm {
             Ok(grm) => {
                 let result = lrtable::from_yacc(&grm, lrtable::Minimiser::Pager);
 
                 match result {
                     Ok((sgraph, stable)) => {
-                        let _ = parse_state
-                            .parse_tables
-                            .insert(path.to_owned(), std::sync::Arc::new((grm, sgraph, stable)));
+                        let _ = parse_state.parse_tables.insert(
+                            parser_info.y_file.to_owned(),
+                            std::sync::Arc::new((grm, sgraph, stable)),
+                        );
                     }
                     Err(e) => {
+                        let _ = parse_state.parse_tables.remove(&parser_info.y_file);
                         self.client
                             .log_message(lsp::MessageType::ERROR, format!("{}", e))
                             .await;
@@ -179,6 +234,7 @@ impl Backend {
                 }
             }
             Err(e) => {
+                let _ = parse_state.parse_tables.remove(&parser_info.y_file);
                 self.client
                     .log_message(lsp::MessageType::ERROR, format!("{}", e))
                     .await;
@@ -202,6 +258,20 @@ impl FileState {
             &mut self.fs_files,
             &mut self.by_extension,
         )
+    }
+
+    fn rope_for_path(&self, path: &std::path::Path) -> Option<&rope::Rope> {
+        let url = lsp::Url::from_file_path(path);
+        if let Ok(url) = url {
+            let it = self.editor_files.get(&url);
+            if it.is_some() {
+                it
+            } else {
+                self.fs_files.get(path)
+            }
+        } else {
+            None
+        }
     }
 }
 
@@ -243,6 +313,7 @@ struct ParserInfo {
     l_file: std::path::PathBuf,
     y_file: std::path::PathBuf,
     recovery_kind: lrpar::RecoveryKind,
+    yacc_kind: cfgrammar::yacc::YaccKind,
 }
 
 #[derive(Default, Debug)]
@@ -343,14 +414,8 @@ impl tower_lsp::LanguageServer for Backend {
                     let y_file_path = workspace_path.join(parser.y_file.get_ref());
                     let l_contents = std::fs::read_to_string(&l_file_path);
                     let y_contents = std::fs::read_to_string(&y_file_path);
-                    fs_files.insert(
-                        (&parser.l_file).clone().into_inner(),
-                        rope::Rope::from(l_contents.unwrap()),
-                    );
-                    fs_files.insert(
-                        (&parser.y_file).clone().into_inner(),
-                        rope::Rope::from(y_contents.unwrap()),
-                    );
+                    fs_files.insert(l_file_path, rope::Rope::from(l_contents.unwrap()));
+                    fs_files.insert(y_file_path, rope::Rope::from(y_contents.unwrap()));
                 }
                 (
                     workspace_path,
@@ -456,12 +521,13 @@ impl tower_lsp::LanguageServer for Backend {
                     };
 
                     if !by_extension.contains_key(extension) {
-                        let parser_files = ParserInfo {
-                            l_file: parser.l_file.get_ref().to_path_buf(),
-                            y_file: parser.y_file.get_ref().to_path_buf(),
+                        let parser_info = ParserInfo {
+                            l_file: workspace_path.join(parser.l_file.get_ref()),
+                            y_file: workspace_path.join(parser.y_file.get_ref()),
                             recovery_kind: parser.recovery_kind,
+                            yacc_kind: parser.yacc_kind,
                         };
-                        by_extension.insert(extension.to_string(), parser_files);
+                        by_extension.insert(extension.to_string(), parser_info);
                     } else {
                         // TODO get real positions from spans
                         let (start, end) = parser.extension.span();
@@ -663,96 +729,49 @@ impl tower_lsp::LanguageServer for Backend {
         }
         // construct lex/parsing tables.
         {
-            let (toml, editor_files, fs_files, _) = state.mut_borrow();
-            for (workspace_path, WorkspaceCfg { workspace, .. }) in toml.iter() {
+            for (workspace_path, WorkspaceCfg { workspace, .. }) in state.toml.iter() {
                 for parser in workspace.parsers.get_ref() {
-                    let lex_path = parser.l_file.get_ref();
-                    let yacc_path = parser.y_file.get_ref();
-
-                    let lex_url_result = lsp::Url::from_file_path(workspace_path.join(lex_path));
-                    let yacc_url_result = lsp::Url::from_file_path(workspace_path.join(yacc_path));
-
-                    match lex_url_result {
-                        Ok(lex_url) => {
-                            let lex_contents = editor_files.get(&lex_url);
-
-                            if let Some(lex_contents) = lex_contents {
-                                self.build_lex_stuff(lex_path, &lex_contents.to_string())
-                                    .await;
-                            } else {
-                                let lex_contents = fs_files.get(lex_path);
-                                if let Some(lex_contents) = lex_contents {
-                                    self.build_lex_stuff(lex_path, &lex_contents.to_string())
-                                        .await;
-                                } else {
-                                    self.client
-                                        .log_message(
-                                            lsp::MessageType::ERROR,
-                                            format!("cannot find l_file: {}", lex_path.display()),
-                                        )
-                                        .await;
-                                }
-                            };
-                        }
-                        Err(()) => {
+                    let parser_info = ParserInfo {
+                        l_file: workspace_path.join(parser.l_file.get_ref()),
+                        y_file: workspace_path.join(parser.y_file.get_ref()),
+                        recovery_kind: parser.recovery_kind,
+                        yacc_kind: parser.yacc_kind,
+                    };
+                    let lex_contents = state.rope_for_path(&parser_info.l_file);
+                    let yacc_contents = state.rope_for_path(&parser_info.y_file);
+                    if let (Some(lex_contents), Some(yacc_contents)) =
+                        (&lex_contents, &yacc_contents)
+                    {
+                        self.build_stuff(
+                            &parser_info,
+                            &lex_contents.to_string(),
+                            &yacc_contents.to_string(),
+                        )
+                        .await;
+                    } else {
+                        if lex_contents.is_none() {
                             self.client
                                 .log_message(
                                     lsp::MessageType::ERROR,
                                     format!(
-                                        "error converting lex path to url: {}",
-                                        lex_path.display()
+                                        "Couldn't find lex data {}",
+                                        &parser_info.l_file.display()
                                     ),
                                 )
                                 .await;
                         }
-                    };
-
-                    match yacc_url_result {
-                        Ok(yacc_url) => {
-                            let yacc_contents = editor_files.get(&yacc_url);
-                            if let Some(yacc_contents) = yacc_contents {
-                                self.build_yacc_stuff(
-                                    yacc_path,
-                                    parser.yacc_kind,
-                                    parser.recovery_kind,
-                                    &yacc_contents.to_string(),
-                                )
-                                .await;
-                            } else {
-                                let yacc_contents = fs_files.get(yacc_path);
-                                if let Some(yacc_contents) = yacc_contents {
-                                    self.build_yacc_stuff(
-                                        yacc_path,
-                                        parser.yacc_kind,
-                                        parser.recovery_kind,
-                                        &yacc_contents.to_string(),
-                                    )
-                                    .await;
-                                } else {
-                                    self.client
-                                        .log_message(
-                                            lsp::MessageType::ERROR,
-                                            format!(
-                                                "could not find yacc file: {}",
-                                                yacc_path.display()
-                                            ),
-                                        )
-                                        .await;
-                                }
-                            }
-                        }
-                        Err(()) => {
+                        if yacc_contents.is_none() {
                             self.client
                                 .log_message(
                                     lsp::MessageType::ERROR,
                                     format!(
-                                        "error converting yacc path to url: {}",
-                                        lex_path.display()
+                                        "Couldn't find yacc data {}",
+                                        &parser_info.y_file.display()
                                     ),
                                 )
                                 .await;
                         }
-                    };
+                    }
                 }
             }
         }
@@ -836,8 +855,8 @@ impl tower_lsp::LanguageServer for Backend {
                 }
                 Ok(path) => {
                     {
-                        let (_, editor_files, _, _) = state.mut_borrow();
-                        let rope = editor_files
+                        let rope = state
+                            .editor_files
                             .entry(uri.clone())
                             .or_insert(rope::Rope::from(""));
 
@@ -878,7 +897,6 @@ impl tower_lsp::LanguageServer for Backend {
                                     .await;
                             } else {
                                 for (workspace_path, workspacecfg) in state.toml.iter() {
-                                    let rope = state.editor_files.get(&uri).unwrap();
                                     for parser in workspacecfg.workspace.parsers.get_ref() {
                                         foo_extension = if let Some(ext) =
                                             parser.extension.get_ref().strip_prefix('.')
@@ -887,19 +905,31 @@ impl tower_lsp::LanguageServer for Backend {
                                         } else {
                                             Some(parser.extension.get_ref().to_string())
                                         };
-                                        if workspace_path.join(parser.l_file.get_ref()) == path {
-                                            self.build_lex_stuff(&path, &rope.to_string()).await;
-                                            break;
-                                        } else if workspace_path.join(parser.y_file.get_ref())
-                                            == path
+
+                                        let parser_info = ParserInfo {
+                                            l_file: workspace_path.join(parser.l_file.get_ref()),
+                                            y_file: workspace_path.join(parser.y_file.get_ref()),
+                                            recovery_kind: parser.recovery_kind,
+                                            yacc_kind: parser.yacc_kind,
+                                        };
+
+                                        if parser_info.l_file == path || parser_info.y_file == path
                                         {
-                                            self.build_yacc_stuff(
-                                                &path,
-                                                parser.yacc_kind,
-                                                parser.recovery_kind,
-                                                &rope.to_string(),
-                                            )
-                                            .await;
+                                            let lex_contents =
+                                                state.rope_for_path(&parser_info.l_file);
+                                            let yacc_contents =
+                                                state.rope_for_path(&parser_info.y_file);
+                                            if let (Some(lex_contents), Some(yacc_contents)) =
+                                                (lex_contents, yacc_contents)
+                                            {
+                                                self.build_stuff(
+                                                    &parser_info,
+                                                    &lex_contents.to_string(),
+                                                    &yacc_contents.to_string(),
+                                                )
+                                                .await;
+                                            }
+                                            break;
                                         } else {
                                             foo_extension = None;
                                             self.client
@@ -941,20 +971,19 @@ impl tower_lsp::LanguageServer for Backend {
         let url = params.text_document.uri;
         let mut state = self.state.lock().await;
         let rope = rope::Rope::from(params.text_document.text);
-
-        state.editor_files.insert(url, rope);
         self.client
-            .log_message(lsp::MessageType::LOG, "did_open")
+            .log_message(lsp::MessageType::LOG, format!("did_open {}", &url))
             .await;
+        state.editor_files.insert(url, rope);
     }
 
     async fn did_close(&self, params: lsp::DidCloseTextDocumentParams) {
         let url = params.text_document.uri;
         let mut state = self.state.lock().await;
-        state.editor_files.remove(&url);
         self.client
-            .log_message(lsp::MessageType::LOG, "did_close")
+            .log_message(lsp::MessageType::LOG, format!("did_close {}", url))
             .await;
+        state.editor_files.remove(&url);
     }
 
     async fn did_change_watched_files(&self, params: lsp::DidChangeWatchedFilesParams) {
