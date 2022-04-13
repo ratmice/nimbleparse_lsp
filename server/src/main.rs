@@ -107,7 +107,21 @@ impl Backend {
                                     panic!("YaccKind {:?} for nimbleparse_lsp", yacc_kind)
                                 }
                             };
-                            results.push((key.to_file_path().unwrap(), pt, errors, now.elapsed()))
+                            let test_dir_path = path.parent();
+                            if let Some(test_dir_path) = test_dir_path {
+                                let test_dir = state.test_dirs.get(&test_dir_path.to_owned());
+                                if let Some(test_dir) = test_dir {
+                                    let should_pass = test_dir.pass;
+
+                                    results.push((
+                                        key.to_file_path().unwrap(),
+                                        pt,
+                                        errors,
+                                        should_pass,
+                                        now.elapsed(),
+                                    ))
+                                }
+                            }
                         }
                     }
 
@@ -137,7 +151,21 @@ impl Backend {
                                     }
                                 };
 
-                                results.push((path.to_owned(), pt, errors, now.elapsed()))
+                                let test_dir_path = path.parent();
+                                if let Some(test_dir_path) = test_dir_path {
+                                    let test_dir = state.test_dirs.get(&test_dir_path.to_owned());
+                                    if let Some(test_dir) = test_dir {
+                                        let should_pass = test_dir.pass;
+
+                                        results.push((
+                                            path.to_owned(),
+                                            pt,
+                                            errors,
+                                            should_pass,
+                                            now.elapsed(),
+                                        ))
+                                    }
+                                }
                             }
                         }
                     }
@@ -167,15 +195,16 @@ impl Backend {
                 }
             }
 
-            for (path, parse_tree, errors, time) in results {
+            for (path, parse_tree, errors, should_pass, time) in results {
                 self.client
                     .log_message(
                         lsp::MessageType::INFO,
                         format!(
-                            "parsed: {:?} {} to: {:?} errors {:?}",
+                            "parsed: {:?} {} to: {:?} should_pass: {}, errors {:?}",
                             time,
                             path.display(),
                             parse_tree,
+                            should_pass,
                             errors
                         ),
                     )
@@ -293,12 +322,14 @@ impl FileState {
         &mut UrlFiles,
         &mut PathFiles,
         &mut ByExtension,
+        &mut TestDirMap,
     ) {
         (
             &mut self.toml,
             &mut self.editor_files,
             &mut self.fs_files,
             &mut self.by_extension,
+            &mut self.test_dirs,
         )
     }
 
@@ -324,11 +355,10 @@ struct WorkspaceCfg {
     toml_file: rope::Rope,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct TestDir {
     workspace_path: std::path::PathBuf,
     toml_value: toml::Spanned<std::path::PathBuf>,
-    #[allow(unused)] // FIXME use
     pass: bool,
 }
 
@@ -337,10 +367,12 @@ type Workspaces = imbl::HashMap<std::path::PathBuf, WorkspaceCfg>;
 type UrlFiles = imbl::HashMap<lsp::Url, rope::Rope>;
 type PathFiles = imbl::HashMap<std::path::PathBuf, rope::Rope>;
 type ByExtension = imbl::HashMap<String, ParserInfo>;
+type TestDirMap = imbl::HashMap<std::path::PathBuf, TestDir>;
 type LexTable = imbl::HashMap<
     std::path::PathBuf,
     std::sync::Arc<lrlex::LRNonStreamingLexerDef<lrlex::DefaultLexeme<u32>, u32>>,
 >;
+
 type ParseTables = imbl::HashMap<
     std::path::PathBuf,
     std::sync::Arc<(
@@ -375,6 +407,7 @@ struct FileState {
     editor_files: UrlFiles,
     fs_files: PathFiles,
     by_extension: imbl::HashMap<String, ParserInfo>,
+    test_dirs: TestDirMap,
     warned_needs_restart: bool,
     client_monitor: bool,
 }
@@ -437,7 +470,7 @@ impl tower_lsp::LanguageServer for Backend {
             })
         });
 
-        let (toml, _, fs_files, _) = state.mut_borrow();
+        let (toml, _, fs_files, _, _) = state.mut_borrow();
         // Read nimbleparse.toml
         {
             let paths = params.workspace_folders.unwrap();
@@ -537,11 +570,10 @@ impl tower_lsp::LanguageServer for Backend {
             }
         }
 
-        let mut test_dirs: imbl::HashMap<std::path::PathBuf, TestDir> = imbl::HashMap::new();
         let mut diagnostics: imbl::HashMap<std::path::PathBuf, Vec<lsp::Diagnostic>> =
             imbl::HashMap::new();
         {
-            let (toml, _, _, by_extension) = state.mut_borrow();
+            let (toml, _, _, by_extension, test_dirs) = state.mut_borrow();
             for (
                 workspace_path,
                 WorkspaceCfg {
@@ -654,7 +686,7 @@ impl tower_lsp::LanguageServer for Backend {
 
         // non-recursive walk over `test.dir/*.extension`,
         // reading paths into state.fs_files.
-
+        let (toml, _, fs_files, by_extension, test_dirs) = state.mut_borrow();
         for (
             test_dir,
             TestDir {
@@ -662,10 +694,9 @@ impl tower_lsp::LanguageServer for Backend {
                 toml_value,
                 ..
             },
-        ) in test_dirs
+        ) in test_dirs.iter()
         {
-            let (toml, _, fs_files, by_extension) = state.mut_borrow();
-            let cfg = toml.get(&workspace_path);
+            let cfg = toml.get(workspace_path);
             if let Some(WorkspaceCfg {
                 toml_path,
                 toml_file,
