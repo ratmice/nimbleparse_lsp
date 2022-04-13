@@ -6,6 +6,7 @@ use std::fmt;
 
 /* traits */
 use lrlex::LexerDef as _;
+use num_traits::ToPrimitive as _;
 
 #[derive(thiserror::Error, Debug)]
 enum ServerError {
@@ -192,13 +193,13 @@ impl Backend {
                     .insert(parser_info.l_file.clone(), std::sync::Arc::new(lex));
                 true
             }
-            Err(_e) => {
+            Err(e) => {
                 let _ = parse_state.lex_tables.remove(&parser_info.l_file);
                 let _ = parse_state.parse_tables.remove(&parser_info.y_file);
                 self.client
                     .log_message(
                         lsp::MessageType::ERROR,
-                        "error building lexer, removed stale instances of parser and lexer",
+                        format!("{}: {}", parser_info.l_file.display(), e),
                     )
                     .await;
                 false
@@ -217,6 +218,36 @@ impl Backend {
         match grm {
             Ok(grm) => {
                 let result = lrtable::from_yacc(&grm, lrtable::Minimiser::Pager);
+                {
+                    // unwrap: if this could fail we wouldn't be here
+                    let lexerdef = parse_state.lex_tables.get_mut(&parser_info.l_file).unwrap();
+                    let lexerdef = std::sync::Arc::get_mut(lexerdef);
+                    if let Some(lexerdef) = lexerdef {
+                        let rule_ids = &grm
+                            .tokens_map()
+                            .iter()
+                            .map(|(&n, &i)| (n, usize::from(i).to_u32().unwrap()))
+                            .collect();
+
+                        let (missing_from_lexer, missing_from_parser) =
+                            lexerdef.set_rule_ids(rule_ids);
+
+                        if let Some(tokens) = missing_from_parser {
+                            let mut sorted = tokens.iter().cloned().collect::<Vec<&str>>();
+                            sorted.sort_unstable();
+                            self.client
+                                .log_message(lsp::MessageType::ERROR, format!("{}: tokens {:?} defined in the lexer but not referenced in the grammar", parser_info.y_file.display(), sorted))
+                                .await;
+                        }
+                        if let Some(tokens) = missing_from_lexer {
+                            let mut sorted = tokens.iter().cloned().collect::<Vec<&str>>();
+                            sorted.sort_unstable();
+                            self.client
+                                .log_message(lsp::MessageType::ERROR, format!("{}: tokens {:?} referenced in the grammar but not in the lexer", parser_info.y_file.display(), sorted))
+                                .await;
+                        }
+                    }
+                }
 
                 match result {
                     Ok((sgraph, stable)) => {
@@ -225,10 +256,14 @@ impl Backend {
                             std::sync::Arc::new((grm, sgraph, stable)),
                         );
                     }
+
                     Err(e) => {
                         let _ = parse_state.parse_tables.remove(&parser_info.y_file);
                         self.client
-                            .log_message(lsp::MessageType::ERROR, format!("{}", e))
+                            .log_message(
+                                lsp::MessageType::ERROR,
+                                format!("{}: {}", parser_info.y_file.display(), e),
+                            )
                             .await;
                     }
                 }
@@ -236,7 +271,10 @@ impl Backend {
             Err(e) => {
                 let _ = parse_state.parse_tables.remove(&parser_info.y_file);
                 self.client
-                    .log_message(lsp::MessageType::ERROR, format!("{}", e))
+                    .log_message(
+                        lsp::MessageType::ERROR,
+                        format!("{}: {}", parser_info.y_file.display(), e),
+                    )
                     .await;
             }
         };
