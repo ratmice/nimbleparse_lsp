@@ -34,18 +34,18 @@ After installing prerequisites
 ```
 cargo run --bin xtask -- install
 ```
-
-## Neovim Install
-
-```
-cargo install --path server
-````
-Then follow the configuration in [neovim/](neovim/README.md) 
-
-
-## Prerequisites
-This is perhaps incomplete, you'll need at least `vscode`, `npm`, `vsce`
+for vscode you will need at least `vscode`, `npm`, `vsce`
 
 ```
 npm install --global vsce
 ```
+
+## Neovim Install
+
+```
+cargo run --bin xtask -- install --server
+````
+Then follow the configuration in [neovim/](neovim/README.md) 
+
+## Developer options
+Append `--console` to the install command, to enable tokio-console support. 

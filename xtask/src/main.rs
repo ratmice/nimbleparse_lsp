@@ -18,7 +18,18 @@ impl flags::Install {
         let default = !(self.server || self.client);
 
         if self.server || default {
-            cmd!(sh, "cargo install --path server").run()?;
+            if self.console {
+                let rustc_flags = std::env::var("RUSTCFLAGS");
+                let _pushenv_guard = if let Ok(mut rustc_flags) = rustc_flags {
+                    rustc_flags.push_str("--cfg tokio_unstable");
+                    sh.push_env("RUSTFLAGS", rustc_flags)
+                } else {
+                    sh.push_env("RUSTFLAGS", "--cfg tokio_unstable")
+                };
+                cmd!(sh, "cargo install --path server --features=console").run()?;
+            } else {
+                cmd!(sh, "cargo install --path server").run()?;
+            }
         }
 
         if self.client || default {

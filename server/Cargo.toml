@@ -21,3 +21,11 @@ lrpar = { git = "https://github.com/softdevteam/grmtools" }
 lrlex = { git = "https://github.com/softdevteam/grmtools" }
 lrtable = { git = "https://github.com/softdevteam/grmtools" }
 num-traits = "0.2.14"
+
+[dependencies.console-subscriber]
+version = "0.1.4"
+optional = true
+
+[features]
+default = []
+console = ["console-subscriber"]

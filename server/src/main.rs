@@ -1129,6 +1129,9 @@ fn main() -> Result<(), ServerError> {
         .unwrap()
         .to_string_lossy();
 
+    #[cfg(all(feature = "console", tokio_unstable))]
+    console_subscriber::init();
+
     if let Some(arg) = args.next() {
         let arg = arg.trim();
         if arg == "--workspace" {

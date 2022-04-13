@@ -6,10 +6,11 @@ xflags::xflags! {
             optional -h, --help
         }
 
-    cmd install {
-        optional --client
-        optional --server
-    }
+        cmd install {
+            optional --client
+            optional --server
+            optional --console
+        }
     }
 }
 // generated start
@@ -35,6 +36,7 @@ pub struct Help {
 pub struct Install {
     pub client: bool,
     pub server: bool,
+    pub console: bool,
 }
 
 impl Xtask {
