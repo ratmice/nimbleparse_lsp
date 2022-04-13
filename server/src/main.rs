@@ -112,29 +112,33 @@ impl Backend {
                     }
 
                     for (path, value) in state.fs_files.iter() {
-                        if path.extension().map(std::ffi::OsStr::to_string_lossy)
-                            == Some(extension.into())
-                        {
-                            let input = value.to_string();
-                            let now = std::time::Instant::now();
-                            let lexer = lex_stuff.lexer(&input);
-                            let (pt, errors) = match yacc_kind {
-                                cfgrammar::yacc::YaccKind::Original(
-                                    cfgrammar::yacc::YaccOriginalActionKind::NoAction,
-                                ) => (None, pb.parse_noaction(&lexer)),
+                        let url = lsp::Url::from_file_path(path);
+                        if let Ok(url) = url {
+                            if !state.editor_files.contains_key(&url)
+                                && path.extension().map(std::ffi::OsStr::to_string_lossy)
+                                    == Some(extension.into())
+                            {
+                                let input = value.to_string();
+                                let now = std::time::Instant::now();
+                                let lexer = lex_stuff.lexer(&input);
+                                let (pt, errors) = match yacc_kind {
+                                    cfgrammar::yacc::YaccKind::Original(
+                                        cfgrammar::yacc::YaccOriginalActionKind::NoAction,
+                                    ) => (None, pb.parse_noaction(&lexer)),
 
-                                cfgrammar::yacc::YaccKind::Original(
-                                    cfgrammar::yacc::YaccOriginalActionKind::GenericParseTree,
-                                ) => {
-                                    let (pt, errors) = pb.parse_generictree(&lexer);
-                                    (Some(pt), errors)
-                                }
-                                _ => {
-                                    panic!("YaccKind {:?} for nimbleparse_lsp", yacc_kind)
-                                }
-                            };
+                                    cfgrammar::yacc::YaccKind::Original(
+                                        cfgrammar::yacc::YaccOriginalActionKind::GenericParseTree,
+                                    ) => {
+                                        let (pt, errors) = pb.parse_generictree(&lexer);
+                                        (Some(pt), errors)
+                                    }
+                                    _ => {
+                                        panic!("YaccKind {:?} for nimbleparse_lsp", yacc_kind)
+                                    }
+                                };
 
-                            results.push((path.to_owned(), pt, errors, now.elapsed()))
+                                results.push((path.to_owned(), pt, errors, now.elapsed()))
+                            }
                         }
                     }
                 } else {
