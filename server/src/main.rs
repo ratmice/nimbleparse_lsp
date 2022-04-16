@@ -60,16 +60,39 @@ struct ParserMsg {}
 
 type ParserId = usize;
 
-fn parser_thread_init(
+struct ParseThread {
     parser_info: ParserInfo,
     output: tokio::sync::mpsc::UnboundedSender<ParserMsg>,
-    mut input: tokio::sync::mpsc::UnboundedReceiver<EditorMsg>,
-    mut shutdown: tokio::sync::broadcast::Receiver<()>,
-) -> impl FnOnce() {
-    move || {
-        while let Err(tokio::sync::broadcast::error::TryRecvError::Empty) = shutdown.try_recv() {
-            if let Some(input) = input.blocking_recv() {
-                output.send(ParserMsg {}).unwrap();
+    input: tokio::sync::mpsc::UnboundedReceiver<EditorMsg>,
+    shutdown: tokio::sync::broadcast::Receiver<()>,
+}
+
+async fn process_parser_messages(
+    client: tower_lsp::Client,
+    mut recv: tokio::sync::mpsc::UnboundedReceiver<ParserMsg>,
+) {
+    loop {
+        let val_from_parser = recv.recv().await;
+        if let Some(val_from_parser) = val_from_parser {
+            client
+                .log_message(
+                    lsp::MessageType::INFO,
+                    format!("sent message and received response {:?}", val_from_parser),
+                )
+                .await;
+        }
+    }
+}
+
+impl ParseThread {
+    fn init(mut self: ParseThread) -> impl FnOnce() {
+        move || {
+            while let Err(tokio::sync::broadcast::error::TryRecvError::Empty) =
+                self.shutdown.try_recv()
+            {
+                if let Some(input) = self.input.blocking_recv() {
+                    self.output.send(ParserMsg {}).unwrap();
+                }
             }
         }
     }
@@ -82,10 +105,7 @@ struct State {
     client_monitor: bool,
     extensions: imbl::HashMap<std::ffi::OsString, ParserInfo>,
     shutdown: tokio::sync::broadcast::Sender<()>,
-    parser_channels: Vec<(
-        tokio::sync::mpsc::UnboundedSender<EditorMsg>,
-        tokio::sync::mpsc::UnboundedReceiver<ParserMsg>,
-    )>,
+    parser_channels: Vec<tokio::sync::mpsc::UnboundedSender<EditorMsg>>,
 }
 
 #[derive(Debug)]
@@ -258,12 +278,16 @@ impl tower_lsp::LanguageServer for Backend {
                         tokio::sync::mpsc::UnboundedSender<ParserMsg>,
                         tokio::sync::mpsc::UnboundedReceiver<ParserMsg>,
                     ) = tokio::sync::mpsc::unbounded_channel();
-                    state.parser_channels.push((input_send, parse_recv));
-                    std::thread::spawn(parser_thread_init(
+                    state.parser_channels.push(input_send);
+                    std::thread::spawn(ParseThread::init(ParseThread {
                         parser_info,
-                        parse_send,
-                        input_recv,
-                        state.shutdown.subscribe(),
+                        output: parse_send,
+                        input: input_recv,
+                        shutdown: state.shutdown.subscribe(),
+                    }));
+                    let _ = tokio::task::spawn(process_parser_messages(
+                        self.client.clone(),
+                        parse_recv,
                     ));
                 }
             }
@@ -347,23 +371,8 @@ impl tower_lsp::LanguageServer for Backend {
                             drop(state);
                             let mut state = self.state.lock().await;
                             let result = state.parser_channels.get_mut(id);
-                            if let Some((send, recv)) = result {
+                            if let Some(send) = result {
                                 send.send(EditorMsg {}).unwrap();
-                                loop {
-                                    let val_from_parser = recv.recv().await;
-                                    if let Some(val_from_parser) = val_from_parser {
-                                        self.client
-                                            .log_message(
-                                                lsp::MessageType::INFO,
-                                                format!(
-                                                    "sent message and received response {:?}",
-                                                    val_from_parser
-                                                ),
-                                            )
-                                            .await;
-                                        break;
-                                    }
-                                }
                             } else {
                                 self.client
                                     .log_message(lsp::MessageType::INFO, "None channels")
