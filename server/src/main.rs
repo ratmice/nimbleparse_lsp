@@ -1,12 +1,9 @@
-use lrpar::RTParserBuilder;
-use std::fmt;
 use tower_lsp::jsonrpc;
 use tower_lsp::lsp_types as lsp;
 use xi_rope as rope;
 
 // traits
-use lrlex::LexerDef as _;
-use num_traits::ToPrimitive as _;
+use std::ops::DerefMut;
 
 #[derive(thiserror::Error, Debug)]
 enum ServerError {
@@ -34,8 +31,7 @@ enum ParseTableError {
 
 #[derive(Debug)]
 struct Backend {
-    state: tokio::sync::Mutex<FileState>,
-    parse_state: tokio::sync::Mutex<ParseState>,
+    state: tokio::sync::Mutex<State>,
     client: tower_lsp::Client,
 }
 
@@ -46,426 +42,54 @@ struct WorkspaceCfg {
     toml_file: rope::Rope,
 }
 
-#[derive(Clone, Debug)]
-struct TestDir {
-    workspace_path: std::path::PathBuf,
-    toml_value: toml::Spanned<std::path::PathBuf>,
-    pass: bool,
-}
-
 type Workspaces = imbl::HashMap<std::path::PathBuf, WorkspaceCfg>;
-
-type UrlFiles = imbl::HashMap<lsp::Url, rope::Rope>;
-type PathFiles = imbl::HashMap<std::path::PathBuf, rope::Rope>;
-type ByExtension = imbl::HashMap<String, ParserInfo>;
-type TestDirMap = imbl::HashMap<std::path::PathBuf, TestDir>;
-type LexTable = imbl::HashMap<
-    std::path::PathBuf,
-    std::sync::Arc<lrlex::LRNonStreamingLexerDef<lrlex::DefaultLexeme<u32>, u32>>,
->;
-
-type ParseTables = imbl::HashMap<
-    std::path::PathBuf,
-    std::sync::Arc<(
-        cfgrammar::yacc::YaccGrammar,
-        lrtable::StateGraph<u32>,
-        lrtable::StateTable<u32>,
-    )>,
->;
 
 #[derive(Debug, Clone)]
 struct ParserInfo {
-    l_file: std::path::PathBuf,
-    y_file: std::path::PathBuf,
+    id: ParserId,
+    l_path: std::path::PathBuf,
+    l_contents: rope::Rope,
+    y_path: std::path::PathBuf,
+    y_contents: rope::Rope,
     recovery_kind: lrpar::RecoveryKind,
     yacc_kind: cfgrammar::yacc::YaccKind,
 }
 
-#[derive(Default, Debug, Clone)]
-struct FileState {
-    toml: Workspaces,
-    // FIXME HashMaps everywhere,
-    editor_files: UrlFiles,
-    fs_files: PathFiles,
-    by_extension: imbl::HashMap<String, ParserInfo>,
-    test_dirs: TestDirMap,
-    warned_needs_restart: bool,
-    client_monitor: bool,
-}
+#[derive(Debug)]
+struct ParserMsg {}
 
-#[derive(Default, Clone)]
-struct ParseState {
-    lex_tables: LexTable,
-    parse_tables: ParseTables,
-}
+type ParserId = usize;
 
-enum ChangeEffect {
-    ReparseFile(lsp::Url),
-    ReparseFilesWithExtension(String),
-}
-
-impl ChangeEffect {
-    fn parser_info<'a>(&self, state: &'a FileState) -> Option<&'a ParserInfo> {
-        state.by_extension.get(&self.extension())
-    }
-
-    fn extension(&self) -> String {
-        match self {
-            ChangeEffect::ReparseFile(url) => {
-                let path = url.to_file_path().unwrap();
-                let extension = path.extension().unwrap().to_string_lossy();
-                if let Some(ext) = extension.strip_prefix('.') {
-                    ext.to_string()
-                } else {
-                    extension.to_string()
-                }
+fn parser_thread_init(
+    parser_info: ParserInfo,
+    output: tokio::sync::mpsc::UnboundedSender<ParserMsg>,
+    mut input: tokio::sync::mpsc::UnboundedReceiver<EditorMsg>,
+    mut shutdown: tokio::sync::broadcast::Receiver<()>,
+) -> impl FnOnce() {
+    move || {
+        while let Err(tokio::sync::broadcast::error::TryRecvError::Empty) = shutdown.try_recv() {
+            if let Some(input) = input.blocking_recv() {
+                output.send(ParserMsg {}).unwrap();
             }
-            ChangeEffect::ReparseFilesWithExtension(ext) => ext.to_string(),
         }
     }
 }
 
 #[derive(Debug)]
-enum ParseMessage {
-    ParseFile {
-        path: std::path::PathBuf,
-        input: String,
-    },
-    Abort,
+struct State {
+    toml: Workspaces,
+    warned_needs_restart: bool,
+    client_monitor: bool,
+    extensions: imbl::HashMap<std::ffi::OsString, ParserInfo>,
+    shutdown: tokio::sync::broadcast::Sender<()>,
+    parser_channels: Vec<(
+        tokio::sync::mpsc::UnboundedSender<EditorMsg>,
+        tokio::sync::mpsc::UnboundedReceiver<ParserMsg>,
+    )>,
 }
 
-impl Backend {
-    async fn parse_affected(&self, change_effect: ChangeEffect) {
-        let (result_write, mut result_read) = tokio::sync::mpsc::unbounded_channel();
-        let (input_write, mut input_read) = tokio::sync::mpsc::unbounded_channel();
-        let state = &self.state.lock().await;
-        let parse_state = &self.parse_state.lock().await;
-
-        let parse_should_succeed = |path: &std::path::Path| {
-            let test_dir_path = path.parent();
-            if let Some(test_dir_path) = test_dir_path {
-                let test_dir = state.test_dirs.get(&test_dir_path.to_owned());
-                if let Some(test_dir) = test_dir {
-                    return test_dir.pass;
-                }
-            };
-            false
-        };
-        let parser_info = change_effect.parser_info(state);
-
-        if let Some(ParserInfo {
-            y_file,
-            l_file,
-            recovery_kind,
-            yacc_kind,
-        }) = parser_info
-        {
-            let lexer_def = parse_state.lex_tables.get(l_file);
-            let yacc_stuff = parse_state.parse_tables.get(y_file);
-            if let Some(lexer_def) = lexer_def {
-                if let Some(yacc_stuff) = yacc_stuff {
-                    let yacc_stuff = yacc_stuff.clone();
-                    let lexer_def = lexer_def.clone();
-                    let recovery_kind = *recovery_kind;
-                    let yacc_kind = *yacc_kind;
-                    let parsing_thread = move || {
-                        let recovery_kind = recovery_kind;
-                        let (grm, _, stable) = yacc_stuff.as_ref();
-                        let pb: RTParserBuilder<lrlex::DefaultLexeme, u32> =
-                            lrpar::RTParserBuilder::new(grm, stable).recoverer(recovery_kind);
-                        while let Some(ParseMessage::ParseFile { path, input }) =
-                            input_read.blocking_recv()
-                        {
-                            let now = std::time::Instant::now();
-                            let lexer = lexer_def.lexer(&input);
-                            match yacc_kind {
-                                cfgrammar::yacc::YaccKind::Original(
-                                    cfgrammar::yacc::YaccOriginalActionKind::NoAction,
-                                ) => {
-                                    result_write
-                                        .send((
-                                            path,
-                                            None,
-                                            pb.parse_noaction(&lexer),
-                                            now.elapsed(),
-                                        ))
-                                        .unwrap();
-                                }
-
-                                cfgrammar::yacc::YaccKind::Original(
-                                    cfgrammar::yacc::YaccOriginalActionKind::GenericParseTree,
-                                ) => {
-                                    let (pt, errors) = pb.parse_generictree(&lexer);
-
-                                    result_write
-                                        .send((path, pt, errors, now.elapsed()))
-                                        .unwrap();
-                                }
-                                _ => {}
-                            };
-                        }
-                    };
-                    match change_effect {
-                        ChangeEffect::ReparseFile(url) => {
-                            let path = url.to_file_path().unwrap();
-                            let value = state.editor_files.get(&url).unwrap();
-
-                            tokio::task::spawn_blocking(parsing_thread);
-                            input_write
-                                .send(ParseMessage::ParseFile {
-                                    path,
-                                    input: value.to_string(),
-                                })
-                                .unwrap();
-                            input_write.send(ParseMessage::Abort).unwrap();
-                        }
-
-                        ChangeEffect::ReparseFilesWithExtension(extension) => {
-                            tokio::task::spawn_blocking(parsing_thread);
-                            for (key, value) in state.editor_files.iter() {
-                                let path = key.to_file_path().unwrap();
-                                if path.extension().map(std::ffi::OsStr::to_string_lossy)
-                                    == Some(extension.to_string().into())
-                                {
-                                    input_write
-                                        .send(ParseMessage::ParseFile {
-                                            path,
-                                            input: value.to_string(),
-                                        })
-                                        .unwrap();
-                                }
-                            }
-
-                            for (path, value) in state.fs_files.iter() {
-                                let url = lsp::Url::from_file_path(path);
-                                if let Ok(url) = url {
-                                    if !state.editor_files.contains_key(&url)
-                                        && path.extension().map(std::ffi::OsStr::to_string_lossy)
-                                            == Some(extension.to_string().into())
-                                    {
-                                        input_write
-                                            .send(ParseMessage::ParseFile {
-                                                path: path.into(),
-                                                input: value.to_string(),
-                                            })
-                                            .unwrap();
-                                    }
-                                }
-                            }
-                            input_write.send(ParseMessage::Abort).unwrap();
-                        }
-                    }
-                } else {
-                    result_read.close();
-                    self.client
-                        .log_message(
-                            lsp::MessageType::ERROR,
-                            format!("error finding yacc file contents: {}", y_file.display()),
-                        )
-                        .await;
-                }
-            } else {
-                result_read.close();
-                self.client
-                    .log_message(
-                        lsp::MessageType::ERROR,
-                        format!(
-                            "error finding lex file contents: {} (entries: {})",
-                            l_file.display(),
-                            parse_state.lex_tables.len()
-                        ),
-                    )
-                    .await;
-            }
-        }
-
-        while let Some((path, parse_tree, errors, time)) = result_read.recv().await {
-            let should_pass = parse_should_succeed(path.parent().unwrap());
-            self.client
-                .log_message(
-                    lsp::MessageType::INFO,
-                    format!(
-                        "parsed: {:?} {} to: {:?} should_pass: {}, errors {:?}",
-                        time,
-                        path.display(),
-                        parse_tree,
-                        should_pass,
-                        errors
-                    ),
-                )
-                .await;
-        }
-    }
-
-    async fn build_lex(
-        &self,
-        parser_info: &ParserInfo,
-        parse_state: &mut ParseState,
-        contents: &str,
-    ) -> bool {
-        let lex_table =
-            lrlex::LRNonStreamingLexerDef::<lrlex::DefaultLexeme<u32>, u32>::from_str(contents)
-                .map_err(ParseTableError::LrLex);
-
-        match lex_table {
-            Ok(lex) => {
-                let _ = parse_state
-                    .lex_tables
-                    .insert(parser_info.l_file.clone(), std::sync::Arc::new(lex));
-                true
-            }
-            Err(e) => {
-                let _ = parse_state.lex_tables.remove(&parser_info.l_file);
-                let _ = parse_state.parse_tables.remove(&parser_info.y_file);
-                self.client
-                    .log_message(
-                        lsp::MessageType::ERROR,
-                        format!("{}: {}", parser_info.l_file.display(), e),
-                    )
-                    .await;
-                false
-            }
-        }
-    }
-
-    async fn build_stuff(&self, parser_info: &ParserInfo, lex_contents: &str, yacc_contents: &str) {
-        let mut parse_state = self.parse_state.lock().await;
-        {
-            let now = std::time::Instant::now();
-            if !self
-                .build_lex(parser_info, &mut *parse_state, lex_contents)
-                .await
-            {
-                return;
-            }
-            self.client
-                .log_message(
-                    lsp::MessageType::INFO,
-                    format!(
-                        "built lexer {}: {:?}",
-                        parser_info.l_file.display(),
-                        now.elapsed()
-                    ),
-                )
-                .await;
-        }
-        let now = std::time::Instant::now();
-        let grm = cfgrammar::yacc::YaccGrammar::new(parser_info.yacc_kind, yacc_contents);
-        match grm {
-            Ok(grm) => {
-                let result = lrtable::from_yacc(&grm, lrtable::Minimiser::Pager);
-                {
-                    // unwrap: if this could fail we wouldn't be here
-                    let lexerdef = parse_state.lex_tables.get_mut(&parser_info.l_file).unwrap();
-                    let lexerdef = std::sync::Arc::get_mut(lexerdef);
-                    if let Some(lexerdef) = lexerdef {
-                        let rule_ids = &grm
-                            .tokens_map()
-                            .iter()
-                            .map(|(&n, &i)| (n, usize::from(i).to_u32().unwrap()))
-                            .collect();
-
-                        let (missing_from_lexer, missing_from_parser) =
-                            lexerdef.set_rule_ids(rule_ids);
-
-                        if let Some(tokens) = missing_from_parser {
-                            let mut sorted = tokens.iter().cloned().collect::<Vec<&str>>();
-                            sorted.sort_unstable();
-                            self.client
-                                .log_message(lsp::MessageType::ERROR, format!("{}: tokens {:?} defined in the lexer but not referenced in the grammar", parser_info.y_file.display(), sorted))
-                                .await;
-                        }
-                        if let Some(tokens) = missing_from_lexer {
-                            let mut sorted = tokens.iter().cloned().collect::<Vec<&str>>();
-                            sorted.sort_unstable();
-                            self.client
-                                .log_message(lsp::MessageType::ERROR, format!("{}: tokens {:?} referenced in the grammar but not in the lexer", parser_info.y_file.display(), sorted))
-                                .await;
-                        }
-                    }
-                }
-
-                match result {
-                    Ok((sgraph, stable)) => {
-                        let _ = parse_state.parse_tables.insert(
-                            parser_info.y_file.to_owned(),
-                            std::sync::Arc::new((grm, sgraph, stable)),
-                        );
-                    }
-
-                    Err(e) => {
-                        let _ = parse_state.parse_tables.remove(&parser_info.y_file);
-                        self.client
-                            .log_message(
-                                lsp::MessageType::ERROR,
-                                format!("{}: {}", parser_info.y_file.display(), e),
-                            )
-                            .await;
-                    }
-                }
-            }
-            Err(e) => {
-                let _ = parse_state.parse_tables.remove(&parser_info.y_file);
-                self.client
-                    .log_message(
-                        lsp::MessageType::ERROR,
-                        format!("{}: {}", parser_info.y_file.display(), e),
-                    )
-                    .await;
-            }
-        };
-        self.client
-            .log_message(
-                lsp::MessageType::INFO,
-                format!(
-                    "built parser {}: {:?}",
-                    parser_info.l_file.display(),
-                    now.elapsed()
-                ),
-            )
-            .await;
-    }
-}
-
-impl FileState {
-    fn mut_borrow(
-        &mut self,
-    ) -> (
-        &mut Workspaces,
-        &mut UrlFiles,
-        &mut PathFiles,
-        &mut ByExtension,
-        &mut TestDirMap,
-    ) {
-        (
-            &mut self.toml,
-            &mut self.editor_files,
-            &mut self.fs_files,
-            &mut self.by_extension,
-            &mut self.test_dirs,
-        )
-    }
-
-    fn rope_for_path(&self, path: &std::path::Path) -> Option<&rope::Rope> {
-        let url = lsp::Url::from_file_path(path);
-        if let Ok(url) = url {
-            let it = self.editor_files.get(&url);
-            if it.is_some() {
-                it
-            } else {
-                self.fs_files.get(path)
-            }
-        } else {
-            None
-        }
-    }
-}
-
-impl fmt::Debug for ParseState {
-    fn fmt(&self, _: &mut fmt::Formatter<'_>) -> fmt::Result {
-        Ok(())
-    }
-}
+#[derive(Debug)]
+struct EditorMsg {}
 
 fn initialize_failed(reason: String) -> jsonrpc::Result<lsp::InitializeResult> {
     Err(tower_lsp::jsonrpc::Error {
@@ -486,12 +110,6 @@ impl tower_lsp::LanguageServer for Backend {
             .await;
 
         let caps = params.capabilities;
-        self.client
-            .log_message(
-                lsp::MessageType::ERROR,
-                format!("workspace caps: {:?}", &caps.workspace),
-            )
-            .await;
         if params.workspace_folders.is_none() || caps.workspace.is_none() {
             initialize_failed("requires workspace & capabilities".to_string())?;
         }
@@ -513,7 +131,7 @@ impl tower_lsp::LanguageServer for Backend {
             })
         });
 
-        let (toml, _, fs_files, _, _) = state.mut_borrow();
+        let toml = &mut state.toml;
         // Read nimbleparse.toml
         {
             let paths = params.workspace_folders.unwrap();
@@ -524,17 +142,8 @@ impl tower_lsp::LanguageServer for Backend {
                 let toml_path = workspace_path.join("nimbleparse.toml");
                 // We should probably fix this, to not be sync when we implement reloading the toml file on change...
                 let toml_file = std::fs::read_to_string(&toml_path).unwrap();
-                fs_files.insert(toml_path.clone(), rope::Rope::from(&toml_file));
                 let workspace: nimbleparse_toml::Workspace =
                     toml::de::from_slice(toml_file.as_bytes()).unwrap();
-                for parser in workspace.parsers.get_ref() {
-                    let l_file_path = workspace_path.join(parser.l_file.get_ref());
-                    let y_file_path = workspace_path.join(parser.y_file.get_ref());
-                    let l_contents = std::fs::read_to_string(&l_file_path);
-                    let y_contents = std::fs::read_to_string(&y_file_path);
-                    fs_files.insert(l_file_path, rope::Rope::from(l_contents.unwrap()));
-                    fs_files.insert(y_file_path, rope::Rope::from(y_contents.unwrap()));
-                }
                 (
                     workspace_path,
                     WorkspaceCfg {
@@ -562,6 +171,7 @@ impl tower_lsp::LanguageServer for Backend {
 
     async fn initialized(&self, _: lsp::InitializedParams) {
         let mut state = self.state.lock().await;
+        let state = state.deref_mut();
         let mut globs: Vec<lsp::Registration> = Vec::new();
         if state.client_monitor {
             for (_workspace_path, WorkspaceCfg { workspace, .. }) in &state.toml {
@@ -613,306 +223,60 @@ impl tower_lsp::LanguageServer for Backend {
                 panic!("{}", e);
             }
         }
-
-        let mut diagnostics: imbl::HashMap<std::path::PathBuf, Vec<lsp::Diagnostic>> =
-            imbl::HashMap::new();
-        {
-            let (toml, _, _, by_extension, test_dirs) = state.mut_borrow();
-            for (
-                workspace_path,
-                WorkspaceCfg {
-                    toml_path,
-                    workspace,
-                    toml_file,
-                    ..
-                },
-            ) in toml.iter()
-            {
-                let mut diags = Vec::new();
-                // parser extension should be unique.
-                for parser in workspace.parsers.get_ref() {
-                    let extension = if let Some(ext) = parser.extension.get_ref().strip_prefix('.')
-                    {
-                        ext
-                    } else {
-                        parser.extension.get_ref()
-                    };
-
-                    if !by_extension.contains_key(extension) {
-                        let parser_info = ParserInfo {
-                            l_file: workspace_path.join(parser.l_file.get_ref()),
-                            y_file: workspace_path.join(parser.y_file.get_ref()),
-                            recovery_kind: parser.recovery_kind,
-                            yacc_kind: parser.yacc_kind,
-                        };
-                        by_extension.insert(extension.to_string(), parser_info);
-                    } else {
-                        // TODO get real positions from spans
-                        let (start, end) = parser.extension.span();
-                        let start_line = toml_file.line_of_offset(start) as u32;
-                        let end_line = toml_file.line_of_offset(end) as u32;
-                        let start_character = 0;
-                        let end_character = 0;
-                        let diag = lsp::Diagnostic {
-                            range: lsp::Range {
-                                start: lsp::Position {
-                                    line: start_line,
-                                    character: start_character,
-                                },
-                                end: lsp::Position {
-                                    line: end_line,
-                                    character: end_character,
-                                },
-                            },
-                            severity: Some(lsp::DiagnosticSeverity::ERROR),
-                            source: Some("nimbleparse toml".to_string()),
-                            message: format!(
-                                "multiple parsers for the same file extension: {}",
-                                parser.extension.get_ref()
-                            ),
-                            ..Default::default()
-                        };
-                        diags.push(diag);
-                    }
-                }
-                // test.dir should be unique.
-                for test in &workspace.tests {
-                    let previous_value = test_dirs.insert(
-                        workspace_path.join(test.dir.get_ref()),
-                        TestDir {
-                            workspace_path: workspace_path.clone(),
-                            toml_value: test.dir.clone(),
-                            pass: test.pass,
-                        },
-                    );
-
-                    if previous_value.is_some() {
-                        // TODO get real positions from spans
-                        let (start, end) = test.dir.span();
-                        let start_line = toml_file.line_of_offset(start) as u32;
-                        let end_line = toml_file.line_of_offset(end) as u32;
-                        let start_character = 0;
-                        let end_character = 0;
-                        let diag = lsp::Diagnostic {
-                            range: lsp::Range {
-                                start: lsp::Position {
-                                    line: start_line,
-                                    character: start_character,
-                                },
-                                end: lsp::Position {
-                                    line: end_line,
-                                    character: end_character,
-                                },
-                            },
-                            severity: Some(lsp::DiagnosticSeverity::ERROR),
-                            source: Some("nimbleparse toml [parser]".to_string()),
-                            message: format!(
-                                "multiple instances of test dir: {}",
-                                test.dir.get_ref().display()
-                            ),
-                            ..Default::default()
-                        };
-                        diags.push(diag);
-                    }
-                }
-                diagnostics.insert(toml_path.clone(), diags);
-            }
-        };
-
-        // FIXME Extract this to a function for when file changes eventually.
-
-        // how unfortunate:
-        // stuff below needs to happen after the stuff above,
-        // stuff above needs to be able to display diagnostics,
-        // thus the above must go after initialize,
-        // this is the only place i see that really makes sense, unfortunately it returns unit.
-        // everything below returns Results, the end result is both hideous and tedious.
-
-        // non-recursive walk over `test.dir/*.extension`,
-        // reading paths into state.fs_files.
-        let (toml, _, fs_files, by_extension, test_dirs) = state.mut_borrow();
-        for (
-            test_dir,
-            TestDir {
-                workspace_path,
-                toml_value,
-                ..
-            },
-        ) in test_dirs.iter()
-        {
-            let cfg = toml.get(workspace_path);
-            if let Some(WorkspaceCfg {
-                toml_path,
-                toml_file,
-                ..
-            }) = cfg
-            {
-                let result = tokio::fs::read_dir(&test_dir).await;
-                match result {
-                    Ok(mut dirs) => loop {
-                        let result = (&mut dirs).next_entry().await;
-                        match result {
-                            Ok(Some(entry)) => match entry.file_type().await {
-                                Ok(fs_type) => {
-                                    if fs_type.is_file() {
-                                        if let Some(ext) = entry.path().extension() {
-                                            let ext = ext.to_string_lossy();
-                                            if by_extension.contains_key(ext.as_ref()) {
-                                                let path = entry.path();
-                                                let result = tokio::fs::read_to_string(&path).await;
-                                                match result {
-                                                    Ok(data) => {
-                                                        fs_files
-                                                            .insert(path, rope::Rope::from(data));
-                                                    }
-                                                    Err(e) => {
-                                                        self.client
-                                                            .log_message(
-                                                                lsp::MessageType::ERROR,
-                                                                format!(
-                                                                    "reading file '{}':  {}",
-                                                                    entry.path().display(),
-                                                                    e
-                                                                ),
-                                                            )
-                                                            .await;
-                                                        break;
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    self.client.log_message(
-                                                lsp::MessageType::ERROR,
-                                                format!("getting file_type in directory '{}' for entry '{}':  {}", test_dir.display(), entry.path().display(), e),
-                                            )
-                                            .await;
-                                    break;
-                                }
-                            },
-                            Ok(None) => {
-                                break;
-                            }
-                            Err(e) => {
-                                self.client
-                                    .log_message(
-                                        lsp::MessageType::ERROR,
-                                        format!(
-                                            "While dir entries for '{}': {}",
-                                            test_dir.display(),
-                                            e
-                                        ),
-                                    )
-                                    .await;
-                                break;
-                            }
-                        }
-                    },
-                    Err(e) => {
-                        let diags = diagnostics.get_mut(toml_path);
-                        if let Some(diags) = diags {
-                            let (start, end) = toml_value.span();
-                            let start_line = toml_file.line_of_offset(start) as u32;
-                            let end_line = toml_file.line_of_offset(end) as u32;
-                            let start_character = 0;
-                            let end_character = 0;
-                            let diag = lsp::Diagnostic {
-                                range: lsp::Range {
-                                    start: lsp::Position {
-                                        line: start_line,
-                                        character: start_character,
-                                    },
-                                    end: lsp::Position {
-                                        line: end_line,
-                                        character: end_character,
-                                    },
-                                },
-                                severity: Some(lsp::DiagnosticSeverity::ERROR),
-                                source: Some("nimbleparse toml [parser]".to_string()),
-                                message: format!(
-                                    "in readdir for test dir '{}': {}",
-                                    test_dir.display(),
-                                    e
-                                ),
-                                ..Default::default()
-                            };
-                            diags.push(diag);
-                        }
-                    }
-                }
-            };
-        }
         // construct lex/parsing tables.
         {
-            for (workspace_path, WorkspaceCfg { workspace, .. }) in state.toml.iter() {
-                for parser in workspace.parsers.get_ref() {
+            let extensions = &mut state.extensions;
+
+            for (workspace_path, WorkspaceCfg { workspace, .. }) in (&state.toml).iter() {
+                for (id, parser) in workspace.parsers.get_ref().iter().enumerate() {
+                    let l_path = workspace_path.join(parser.l_file.get_ref());
+                    let y_path = workspace_path.join(parser.y_file.get_ref());
+                    let l_contents = std::fs::read_to_string(&l_path).expect("lex file");
+                    let y_contents = std::fs::read_to_string(&y_path).expect("yacc file");
                     let parser_info = ParserInfo {
-                        l_file: workspace_path.join(parser.l_file.get_ref()),
-                        y_file: workspace_path.join(parser.y_file.get_ref()),
+                        id,
+                        l_path,
+                        l_contents: rope::Rope::from(l_contents),
+                        y_path,
+                        y_contents: rope::Rope::from(y_contents),
                         recovery_kind: parser.recovery_kind,
                         yacc_kind: parser.yacc_kind,
                     };
-                    let lex_contents = state.rope_for_path(&parser_info.l_file);
-                    let yacc_contents = state.rope_for_path(&parser_info.y_file);
-                    if let (Some(lex_contents), Some(yacc_contents)) =
-                        (&lex_contents, &yacc_contents)
-                    {
-                        self.build_stuff(
-                            &parser_info,
-                            &lex_contents.to_string(),
-                            &yacc_contents.to_string(),
-                        )
-                        .await;
-                    } else {
-                        if lex_contents.is_none() {
-                            self.client
-                                .log_message(
-                                    lsp::MessageType::ERROR,
-                                    format!(
-                                        "Couldn't find lex data {}",
-                                        &parser_info.l_file.display()
-                                    ),
-                                )
-                                .await;
-                        }
-                        if yacc_contents.is_none() {
-                            self.client
-                                .log_message(
-                                    lsp::MessageType::ERROR,
-                                    format!(
-                                        "Couldn't find yacc data {}",
-                                        &parser_info.y_file.display()
-                                    ),
-                                )
-                                .await;
-                        }
-                    }
+                    let inner = parser.extension.clone().into_inner();
+                    let extension_str = inner
+                        .strip_prefix('.')
+                        .map(|x| x.to_string())
+                        .unwrap_or(inner);
+                    let extension = std::ffi::OsStr::new(&extension_str);
+
+                    extensions.insert(extension.to_os_string(), parser_info.clone());
+                    let (input_send, input_recv): (
+                        tokio::sync::mpsc::UnboundedSender<EditorMsg>,
+                        tokio::sync::mpsc::UnboundedReceiver<EditorMsg>,
+                    ) = tokio::sync::mpsc::unbounded_channel();
+                    let (parse_send, parse_recv): (
+                        tokio::sync::mpsc::UnboundedSender<ParserMsg>,
+                        tokio::sync::mpsc::UnboundedReceiver<ParserMsg>,
+                    ) = tokio::sync::mpsc::unbounded_channel();
+                    state.parser_channels.push((input_send, parse_recv));
+                    std::thread::spawn(parser_thread_init(
+                        parser_info,
+                        parse_send,
+                        input_recv,
+                        state.shutdown.subscribe(),
+                    ));
                 }
             }
         }
 
-        for (cfg_path, diags) in diagnostics {
-            let url = lsp::Url::from_file_path(cfg_path.clone());
-            match url {
-                Ok(url) => self.client.publish_diagnostics(url, diags, None).await,
-                Err(()) => {
-                    self.client
-                        .log_message(
-                            lsp::MessageType::ERROR,
-                            format!("converting path to url: {}", &cfg_path.display()),
-                        )
-                        .await;
-                }
-            }
-        }
         self.client
             .log_message(lsp::MessageType::LOG, "initialized!")
             .await;
     }
 
     async fn shutdown(&self) -> jsonrpc::Result<()> {
+        let state = self.state.lock().await;
+        state.shutdown.send(()).unwrap();
         self.client
             .log_message(lsp::MessageType::LOG, "server shutdown!")
             .await;
@@ -945,14 +309,15 @@ impl tower_lsp::LanguageServer for Backend {
     }
 
     async fn did_change(&self, params: lsp::DidChangeTextDocumentParams) {
-        let mut change_effect = None;
         // Take the lock under this block
         {
             let mut state = self.state.lock().await;
-            let uri = params.text_document.uri.clone();
-            let path = uri.to_file_path();
+            let url = params.text_document.uri.clone();
+            let path = url.to_file_path();
             let nimbleparse_toml = std::ffi::OsStr::new("nimbleparse.toml");
-
+            self.client
+                .show_message(lsp::MessageType::INFO, format!("did_edit: {}", url))
+                .await;
             match path {
                 Ok(path) if Some(nimbleparse_toml) == path.file_name() => {
                     if !state.warned_needs_restart {
@@ -966,119 +331,74 @@ impl tower_lsp::LanguageServer for Backend {
                     }
                 }
                 Ok(path) => {
-                    {
-                        let rope = state
-                            .editor_files
-                            .entry(uri.clone())
-                            .or_insert(rope::Rope::from(""));
-
-                        for change in params.content_changes {
-                            if let Some(range) = change.range {
-                                let line_start_pos = rope.offset_of_line(range.start.line as usize);
-                                let line_end_pos = rope.offset_of_line(range.end.line as usize);
-                                // FIXME multibyte characters...
-                                let start = line_start_pos + range.start.character as usize;
-                                let end = line_end_pos + range.end.character as usize;
-                                rope.edit(start..end, change.text);
-                            } else {
-                                rope.edit(0..rope.len(), change.text);
-                            }
-                        }
-                        self.client
-                            .log_message(lsp::MessageType::LOG, format!("did_change: {}", rope))
-                            .await;
-                    };
-
-                    {
-                        if let Some(ext) = path.extension() {
-                            if state
-                                .by_extension
-                                .contains_key(&ext.to_string_lossy().to_string())
-                            {
-                                change_effect = Some(ChangeEffect::ReparseFile(uri));
-                            } else {
-                                for (workspace_path, workspacecfg) in state.toml.iter() {
-                                    for parser in workspacecfg.workspace.parsers.get_ref() {
-                                        change_effect =
-                                            Some(ChangeEffect::ReparseFilesWithExtension(
-                                                if let Some(ext) =
-                                                    parser.extension.get_ref().strip_prefix('.')
-                                                {
-                                                    ext.to_string()
-                                                } else {
-                                                    parser.extension.get_ref().to_string()
-                                                },
-                                            ));
-
-                                        let parser_info = ParserInfo {
-                                            l_file: workspace_path.join(parser.l_file.get_ref()),
-                                            y_file: workspace_path.join(parser.y_file.get_ref()),
-                                            recovery_kind: parser.recovery_kind,
-                                            yacc_kind: parser.yacc_kind,
-                                        };
-
-                                        if parser_info.l_file == path || parser_info.y_file == path
-                                        {
-                                            let lex_contents =
-                                                state.rope_for_path(&parser_info.l_file);
-                                            let yacc_contents =
-                                                state.rope_for_path(&parser_info.y_file);
-                                            if let (Some(lex_contents), Some(yacc_contents)) =
-                                                (lex_contents, yacc_contents)
-                                            {
-                                                self.build_stuff(
-                                                    &parser_info,
-                                                    &lex_contents.to_string(),
-                                                    &yacc_contents.to_string(),
-                                                )
-                                                .await;
-                                            }
-                                            break;
-                                        } else {
-                                            change_effect = None;
-                                            self.client
-                                                .log_message(
-                                                    lsp::MessageType::ERROR,
-                                                    format!(
-                                                        "unknown file type changed {} {} {}",
-                                                        path.display(),
-                                                        parser.y_file.get_ref().display(),
-                                                        parser.l_file.get_ref().display(),
-                                                    ),
-                                                )
-                                                .await;
-                                        }
-                                    }
+                    let extension = path.extension();
+                    if let Some(mut extension) = extension {
+                        let mut id = state.extensions.get(extension).map(|x| x.id);
+                        if id.is_none() {
+                            for (_, parser_info) in (&state.extensions).iter() {
+                                if path == parser_info.l_path || path == parser_info.y_path {
+                                    id = Some(parser_info.id)
                                 }
                             }
                         }
+                        if let Some(id) = id {
+                            // ieesh.
+                            let id = id;
+                            drop(state);
+                            let mut state = self.state.lock().await;
+                            let result = state.parser_channels.get_mut(id);
+                            if let Some((send, recv)) = result {
+                                send.send(EditorMsg {}).unwrap();
+                                loop {
+                                    let val_from_parser = recv.recv().await;
+                                    if let Some(val_from_parser) = val_from_parser {
+                                        self.client
+                                            .log_message(
+                                                lsp::MessageType::INFO,
+                                                format!(
+                                                    "sent message and received response {:?}",
+                                                    val_from_parser
+                                                ),
+                                            )
+                                            .await;
+                                        break;
+                                    }
+                                }
+                            } else {
+                                self.client
+                                    .log_message(lsp::MessageType::INFO, "None channels")
+                                    .await;
+                            }
+                        } else {
+                            self.client
+                                .log_message(lsp::MessageType::INFO, "None id")
+                                .await;
+                        }
+                    } else {
+                        self.client
+                            .log_message(lsp::MessageType::INFO, "None extension")
+                            .await;
                     }
                 }
                 Err(()) => {
                     self.client
                         .log_message(
                             lsp::MessageType::LOG,
-                            format!("error: converting url to path: {}", uri),
+                            format!("error: converting url to path: {}", url),
                         )
                         .await;
                 }
             }
         }; // Release the lock.
-
-        if let Some(change_effect) = change_effect {
-            // Wants the lock.
-            self.parse_affected(change_effect).await;
-        }
     }
 
     async fn did_open(&self, params: lsp::DidOpenTextDocumentParams) {
         let url = params.text_document.uri;
-        let mut state = self.state.lock().await;
+        let state = self.state.lock().await;
         let rope = rope::Rope::from(params.text_document.text);
         self.client
             .log_message(lsp::MessageType::LOG, format!("did_open {}", &url))
             .await;
-        state.editor_files.insert(url, rope);
     }
 
     async fn did_close(&self, params: lsp::DidCloseTextDocumentParams) {
@@ -1087,29 +407,13 @@ impl tower_lsp::LanguageServer for Backend {
         self.client
             .log_message(lsp::MessageType::LOG, format!("did_close {}", url))
             .await;
-        state.editor_files.remove(&url);
     }
 
     async fn did_change_watched_files(&self, params: lsp::DidChangeWatchedFilesParams) {
         for file_event in params.changes {
             match file_event.typ {
-                lsp::FileChangeType::CREATED | lsp::FileChangeType::CHANGED => {
-                    let url = file_event.uri;
-                    let data = tokio::fs::read_to_string(url.to_file_path().unwrap())
-                        .await
-                        .unwrap();
-                    let rope = rope::Rope::from(data);
-                    let mut state = self.state.lock().await;
-                    let path = url.to_file_path().unwrap();
-                    state.fs_files.insert(path, rope);
-                }
-                lsp::FileChangeType::DELETED => {
-                    let mut state = self.state.lock().await;
-
-                    state
-                        .fs_files
-                        .remove(&file_event.uri.to_file_path().unwrap());
-                }
+                lsp::FileChangeType::CREATED | lsp::FileChangeType::CHANGED => {}
+                lsp::FileChangeType::DELETED => {}
                 _ => {}
             }
         }
@@ -1138,9 +442,16 @@ fn run_server_arg() -> Result<(), ServerError> {
     rt.block_on(async {
         log::set_max_level(log::LevelFilter::Info);
         let (stdin, stdout) = (tokio::io::stdin(), tokio::io::stdout());
+        let (tx, _) = tokio::sync::broadcast::channel(1);
         let (service, socket) = tower_lsp::LspService::new(|client| Backend {
-            state: Default::default(),
-            parse_state: Default::default(),
+            state: tokio::sync::Mutex::new(State {
+                shutdown: tx,
+                toml: imbl::HashMap::new(),
+                warned_needs_restart: false,
+                client_monitor: false,
+                extensions: imbl::HashMap::new(),
+                parser_channels: Vec::new(),
+            }),
             client,
         });
         tower_lsp::Server::new(stdin, stdout, socket)
