@@ -55,6 +55,12 @@ struct ParserInfo {
     yacc_kind: cfgrammar::yacc::YaccKind,
 }
 
+impl ParserInfo {
+    fn id(&self) -> ParserId {
+        self.id
+    }
+}
+
 #[derive(Debug)]
 struct ParserMsg {}
 
@@ -106,6 +112,7 @@ struct State {
     extensions: imbl::HashMap<std::ffi::OsString, ParserInfo>,
     shutdown: tokio::sync::broadcast::Sender<()>,
     parser_channels: Vec<tokio::sync::mpsc::UnboundedSender<EditorMsg>>,
+    parser_info: Vec<ParserInfo>,
 }
 
 #[derive(Debug)]
@@ -279,6 +286,7 @@ impl tower_lsp::LanguageServer for Backend {
                         tokio::sync::mpsc::UnboundedReceiver<ParserMsg>,
                     ) = tokio::sync::mpsc::unbounded_channel();
                     state.parser_channels.push(input_send);
+                    state.parser_info.push(parser_info.clone());
                     std::thread::spawn(ParseThread::init(ParseThread {
                         parser_info,
                         output: parse_send,
@@ -356,36 +364,58 @@ impl tower_lsp::LanguageServer for Backend {
                 }
                 Ok(path) => {
                     let extension = path.extension();
-                    if let Some(mut extension) = extension {
-                        let mut id = state.extensions.get(extension).map(|x| x.id);
-                        if id.is_none() {
-                            for (_, parser_info) in (&state.extensions).iter() {
-                                if path == parser_info.l_path || path == parser_info.y_path {
-                                    id = Some(parser_info.id)
-                                }
-                            }
-                        }
+                    if let Some(extension) = extension {
+                        let id = state.extensions.get(extension).map(ParserInfo::id);
+                        let mut ids = vec![];
+
+                        // A couple of corner cases here:
+                        //
+                        // * The kind of case where you have foo.l and bar.y/baz.y using the same lexer.
+                        //    -- We should probably allow this case where editing a single file updates multiple parsers.
+                        // * The kind of case where you have a yacc.y for the extension .y, so both the extension
+                        //   and the parse_info have the same id.
+                        //    -- We don't want to run the same parser multiple times: remove duplicates.
+                        // In the general case, where you either change a .l, .y, or a file of the parsers extension
+                        // this will be a vec of one element.
                         if let Some(id) = id {
-                            // ieesh.
-                            let id = id;
-                            drop(state);
-                            let mut state = self.state.lock().await;
+                            ids.push(id);
+                        }
+
+                        ids.extend(
+                            state
+                                .extensions
+                                .values()
+                                .filter(|parser_info| {
+                                    path == parser_info.l_path || path == parser_info.y_path
+                                })
+                                .map(ParserInfo::id),
+                        );
+
+                        ids.sort_unstable();
+                        ids.dedup();
+
+                        for id in ids {
                             let result = state.parser_channels.get_mut(id);
                             if let Some(send) = result {
                                 send.send(EditorMsg {}).unwrap();
                             } else {
                                 self.client
-                                    .log_message(lsp::MessageType::INFO, "None channels")
+                                    .log_message(
+                                        lsp::MessageType::ERROR,
+                                        format!(
+                                            "Internal error: no channel for parser: {:?}",
+                                            state.parser_info[id]
+                                        ),
+                                    )
                                     .await;
                             }
-                        } else {
-                            self.client
-                                .log_message(lsp::MessageType::INFO, "None id")
-                                .await;
                         }
                     } else {
                         self.client
-                            .log_message(lsp::MessageType::INFO, "None extension")
+                            .log_message(
+                                lsp::MessageType::ERROR,
+                                format!("No extension for changed file: {}", path.display()),
+                            )
                             .await;
                     }
                 }
@@ -460,6 +490,7 @@ fn run_server_arg() -> Result<(), ServerError> {
                 client_monitor: false,
                 extensions: imbl::HashMap::new(),
                 parser_channels: Vec::new(),
+                parser_info: Vec::new(),
             }),
             client,
         });
