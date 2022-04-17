@@ -41,8 +41,8 @@ struct Backend {
 #[derive(Debug, Clone)]
 struct WorkspaceCfg {
     workspace: nimbleparse_toml::Workspace,
-    toml_path: std::path::PathBuf,
-    toml_file: rope::Rope,
+    //toml_path: std::path::PathBuf,
+    //toml_file: rope::Rope,
 }
 
 type Workspaces = imbl::HashMap<std::path::PathBuf, WorkspaceCfg>;
@@ -64,8 +64,14 @@ impl ParserInfo {
 }
 
 #[derive(Debug)]
-struct ParserMsg {
-    msg: String,
+enum ParserMsg {
+    Info(String),
+    Parsed(
+        std::path::PathBuf,
+        Option<lrpar::Node<lrlex::DefaultLexeme<u32>, u32>>,
+        Vec<lrpar::LexParseError<lrlex::DefaultLexeme<u32>, u32>>,
+        std::time::Duration,
+    ),
 }
 
 type ParserId = usize;
@@ -73,12 +79,13 @@ type ParserId = usize;
 #[derive(Clone, Debug)]
 struct File {
     contents: rope::Rope,
-    version: Option<i32>,
+    _version: Option<i32>,
 }
 
 type LexTable = lrlex::LRNonStreamingLexerDef<lrlex::DefaultLexeme<u32>, u32>;
 
 struct ParseThread {
+    change_set: std::collections::HashSet<Change>,
     files: imbl::HashMap<std::path::PathBuf, File>,
     parser_info: ParserInfo,
     output: tokio::sync::mpsc::UnboundedSender<ParserMsg>,
@@ -90,6 +97,7 @@ struct ParseThread {
         lrtable::StateGraph<u32>,
         lrtable::StateTable<u32>,
     )>,
+    workspace: (std::path::PathBuf, WorkspaceCfg),
 }
 
 struct PeekableReceiver<T> {
@@ -132,6 +140,15 @@ impl<T> PeekableReceiver<T> {
             self.rx.blocking_recv()
         }
     }
+
+    // This is pretty terrible
+    pub fn conditional_blocking_recv(&mut self, block: bool) -> Option<T> {
+        if block {
+            self.blocking_recv()
+        } else {
+            self.try_recv().ok()
+        }
+    }
 }
 
 async fn process_parser_messages(
@@ -156,12 +173,44 @@ async fn process_parser_messages(
 }
 
 #[derive(Clone, Debug, Hash, PartialOrd, PartialEq, Ord, Eq)]
-enum Change<'a> {
-    ParserForExtension(&'a std::ffi::OsStr),
+enum Change {
+    Extension(std::ffi::OsString, std::path::PathBuf, bool),
     File(std::path::PathBuf),
 }
 
 impl ParseThread {
+    fn maybe_build_stuff(&mut self, path: &std::path::Path) {
+        let (workspace_path, workspace_cfg) = &self.workspace;
+        if self.parser_info.l_path == path || self.parser_info.y_path == path {
+            self.stuff = {
+                if let (Some(lex_file), Some(yacc_file)) = (
+                    self.files.get(self.parser_info.l_path.as_path()),
+                    self.files.get(self.parser_info.y_path.as_path()),
+                ) {
+                    self.build_stuff(
+                        &lex_file.contents.to_string(),
+                        &yacc_file.contents.to_string(),
+                    )
+                } else {
+                    None
+                }
+            };
+            self.change_set.clear();
+            for test_dir in &workspace_cfg.workspace.tests {
+                self.change_set.insert(Change::Extension(
+                    self.parser_info.extension.clone(),
+                    workspace_path.join(test_dir.dir.clone().into_inner()),
+                    test_dir.pass,
+                ));
+            }
+        } else {
+            // FIXME: this should check if it contains an extension for the path.
+            // Should probably get rid of the test_dir aspects of Change.
+            // to make this cleaner.
+            self.change_set.insert(Change::File(path.to_path_buf()));
+        }
+    }
+
     fn build_stuff(
         &self,
         lex_contents: &str,
@@ -205,27 +254,79 @@ impl ParseThread {
     }
     fn init(mut self: ParseThread) -> impl FnOnce() {
         move || {
-            let mut change_set = imbl::HashSet::new();
-            while let Err(tokio::sync::broadcast::error::TryRecvError::Empty) =
+            let (workspace_path, workspace_cfg) = &self.workspace;
+            let test_dirs = &workspace_cfg.workspace.tests;
+            for nimbleparse_toml::TestDir { dir, .. } in test_dirs {
+                // relative
+                let dir = dir.clone().into_inner();
+                // absolute
+                let dir = workspace_path.join(dir);
+                let dir_read = std::fs::read_dir(dir);
+                if let Ok(dir_read) = dir_read {
+                    dir_read.for_each(|file| {
+                        if let Ok(file) = file {
+                            let contents = std::fs::read_to_string(file.path());
+                            if let Ok(contents) = contents {
+                                let contents = rope::Rope::from(contents);
+                                self.files.insert(
+                                    file.path(),
+                                    File {
+                                        contents,
+                                        _version: None,
+                                    },
+                                );
+                            }
+                        }
+                    });
+                }
+            }
+
+            let l_contents = std::fs::read_to_string(self.parser_info.l_path.as_path());
+            let y_contents = std::fs::read_to_string(self.parser_info.y_path.as_path());
+
+            if let (Ok(l_contents), Ok(y_contents)) = (l_contents, y_contents) {
+                self.files.insert(
+                    self.parser_info.l_path.clone(),
+                    File {
+                        contents: rope::Rope::from(l_contents),
+                        _version: None,
+                    },
+                );
+                self.files.insert(
+                    self.parser_info.y_path.clone(),
+                    File {
+                        contents: rope::Rope::from(y_contents),
+                        _version: None,
+                    },
+                );
+                let y_path = self.parser_info.y_path.clone();
+                self.maybe_build_stuff(&y_path);
+            }
+            let mut block = false;
+
+            'top: while let Err(tokio::sync::broadcast::error::TryRecvError::Empty) =
                 self.shutdown.try_recv()
             {
                 use EditorMsg as M;
-                if let Some(input) = self.input.blocking_recv() {
+                let input = self.input.conditional_blocking_recv(block);
+                block = true;
+
+                if let Some(input) = input {
                     match input {
                         M::DidOpen(params) => {
                             if let Ok(path) = params.text_document.uri.to_file_path() {
                                 self.files.insert(
-                                    path,
+                                    path.clone(),
                                     File {
                                         contents: rope::Rope::from(params.text_document.text),
-                                        version: Some(params.text_document.version),
+                                        _version: Some(params.text_document.version),
                                     },
                                 );
+
+                                self.maybe_build_stuff(&path);
                             }
                             self.output
-                                .send(ParserMsg {
-                                    msg: "DidOpen".to_string(),
-                                })
+                                .send(ParserMsg::Info("DidOpen".to_string()))
                                 .unwrap();
                         }
                         M::DidChange(params) => {
@@ -236,7 +337,7 @@ impl ParseThread {
                                 Ok(path) => {
                                     let file = self.files.entry(path.clone()).or_insert(File {
                                         contents: rope::Rope::from(""),
-                                        version: None,
+                                        _version: None,
                                     });
                                     let rope = &mut file.contents;
                                     for change in params.content_changes {
@@ -255,53 +356,104 @@ impl ParseThread {
                                         }
                                     }
 
-                                    if self.parser_info.l_path == path
-                                        || self.parser_info.y_path == path
-                                    {
-                                        let build = {
-                                            if let (Some(lex_file), Some(yacc_file)) = (
-                                                self.files.get(self.parser_info.l_path.as_path()),
-                                                self.files.get(self.parser_info.y_path.as_path()),
-                                            ) {
-                                                self.build_stuff(
-                                                    &lex_file.contents.to_string(),
-                                                    &yacc_file.contents.to_string(),
-                                                )
-                                            } else {
-                                                None
-                                            }
-                                        };
-                                        change_set.clear();
-                                        change_set.insert(Change::ParserForExtension(
-                                            &self.parser_info.extension,
-                                        ));
-                                        self.stuff = build;
-                                    } else {
-                                        change_set.insert(Change::File(path));
-                                    }
+                                    self.maybe_build_stuff(&path);
                                     self.output
-                                        .send(ParserMsg {
-                                            msg: "DidChange".to_string(),
-                                        })
+                                        .send(ParserMsg::Info(format!(
+                                            "DidChange: {}",
+                                            path.display()
+                                        )))
                                         .unwrap();
-                                    let mut files = self.files.iter();
-                                    while self.input.peek().is_none() {
-                                        if let Some((path, file)) = files.next() {
-                                            self.output
-                                                .send(ParserMsg {
-                                                    msg: format!("parsing: {}", path.display()),
-                                                })
-                                                .unwrap();
-                                            std::thread::sleep(std::time::Duration::from_secs(1));
-                                        }
-                                    }
                                 }
                                 Err(()) => {
                                     self.output
-                                        .send(ParserMsg {
-                                            msg: "Error converting url to path".to_string(),
-                                        })
+                                        .send(ParserMsg::Info(
+                                            "Error converting url to path".to_string(),
+                                        ))
                                         .unwrap();
+                                }
+                            }
+                        }
+                    }
+                }
+
+                'change: for change in self.change_set.drain() {
+                    match change {
+                        Change::File(file_path) => {
+                            let file = self.files.get(&file_path);
+                            if let Some(file) = file {
+                                if let Some((lexerdef, grm, _, stable)) = &self.stuff {
+                                    let now = std::time::Instant::now();
+                                    let input = file.contents.to_string();
+                                    let lexer = lexerdef.lexer(&input);
+                                    let pb: lrpar::RTParserBuilder<lrlex::DefaultLexeme, u32> =
+                                        lrpar::RTParserBuilder::new(grm, stable)
+                                            .recoverer(self.parser_info.recovery_kind);
+
+                                    match self.parser_info.yacc_kind {
+                                    cfgrammar::yacc::YaccKind::Original(cfgrammar::yacc::YaccOriginalActionKind::NoAction) => {
+                                        self.output
+                                            .send(ParserMsg::Parsed(
+                                                file_path.to_owned(),
+                                                None,
+                                                pb.parse_noaction(&lexer),
+                                                now.elapsed(),
+                                            ))
+                                            .unwrap();
+                                    },
+                                    cfgrammar::yacc::YaccKind::Original(cfgrammar::yacc::YaccOriginalActionKind::GenericParseTree) => {
+                                        let (pt, errors) = pb.parse_generictree(&lexer);
+                                        self.output
+                                            .send(ParserMsg::Parsed(file_path.to_owned(), pt, errors, now.elapsed()))
+                                            .unwrap();
+                                    }
+                                    _ => {}
+                                }
+                                }
+                            }
+                        }
+                        Change::Extension(_extension, test_dir_path, _pass) => {
+                            let mut files = self.files.iter().filter(|(test_path, _file)| {
+                                test_path.extension() == Some(&self.parser_info.extension)
+                                    && test_path.parent() == Some(&test_dir_path)
+                            });
+
+                            loop {
+                                if self.input.peek().is_some() {
+                                    continue 'top;
+                                }
+
+                                if let Some((path, file)) = files.next() {
+                                    if let Some((lexerdef, grm, _, stable)) = &self.stuff {
+                                        let now = std::time::Instant::now();
+                                        let contents = file.contents.to_string();
+                                        let lexer = lexerdef.lexer(&contents);
+                                        let pb = lrpar::RTParserBuilder::new(grm, stable)
+                                            .recoverer(self.parser_info.recovery_kind);
+                                        match self.parser_info.yacc_kind {
+                                            cfgrammar::yacc::YaccKind::Original(cfgrammar::yacc::YaccOriginalActionKind::NoAction) => {
+                                                self.output
+                                                    .send(ParserMsg::Parsed(
+                                                        path.to_owned(),
+                                                        None,
+                                                        pb.parse_noaction(&lexer),
+                                                        now.elapsed(),
+                                                    ))
+                                                    .unwrap();
+                                            }
+                                            cfgrammar::yacc::YaccKind::Original(cfgrammar::yacc::YaccOriginalActionKind::GenericParseTree) => {
+                                                let (pt, errors) = pb.parse_generictree(&lexer);
+                                                self.output
+                                                    .send(ParserMsg::Parsed(path.to_owned(), pt, errors, now.elapsed()))
+                                                    .unwrap();
+                                            }
+                                            _ => {
+                                            }
+                                        }
+                                    } else {
+                                        continue 'top;
+                                    }
+                                } else {
+                                    continue 'change;
                                 }
                             }
                         }
@@ -415,9 +567,9 @@ impl tower_lsp::LanguageServer for Backend {
                 (
                     workspace_path,
                     WorkspaceCfg {
-                        toml_path,
+                        //toml_path,
                         workspace,
-                        toml_file: rope::Rope::from(toml_file),
+                        //toml_file: rope::Rope::from(toml_file),
                     },
                 )
             }));
@@ -491,31 +643,30 @@ impl tower_lsp::LanguageServer for Backend {
                 panic!("{}", e);
             }
         }
-        // construct lex/parsing tables.
+        // construct extension lookup table
         {
             let extensions = &mut state.extensions;
             let mut output_channels = Vec::new();
-            for (workspace_path, WorkspaceCfg { workspace, .. }) in (&state.toml).iter() {
+            for (workspace_path, workspace_cfg) in (&state.toml).iter() {
+                let workspace = &workspace_cfg.workspace;
                 for (id, parser) in workspace.parsers.get_ref().iter().enumerate() {
                     let l_path = workspace_path.join(parser.l_file.get_ref());
                     let y_path = workspace_path.join(parser.y_file.get_ref());
                     let extension = parser.extension.clone().into_inner();
-                    let extension = std::ffi::OsStr::new(&extension);
-
+                    // Want this to match the output of Path::extension() so trim any leading '.'.
+                    let extension_str = extension
+                        .strip_prefix('.')
+                        .map(|x| x.to_string())
+                        .unwrap_or(extension);
+                    let extension = std::ffi::OsStr::new(&extension_str);
                     let parser_info = ParserInfo {
                         id,
-                        l_path,
-                        y_path,
+                        l_path: workspace_path.join(l_path),
+                        y_path: workspace_path.join(y_path),
                         recovery_kind: parser.recovery_kind,
                         yacc_kind: parser.yacc_kind,
                         extension: extension.to_owned(),
                     };
-                    let inner = parser.extension.clone().into_inner();
-                    let extension_str = inner
-                        .strip_prefix('.')
-                        .map(|x| x.to_string())
-                        .unwrap_or(inner);
-                    let extension = std::ffi::OsStr::new(&extension_str);
 
                     extensions.insert(extension.to_os_string(), parser_info.clone());
                     let (input_send, input_recv) = tokio::sync::mpsc::unbounded_channel();
@@ -525,12 +676,14 @@ impl tower_lsp::LanguageServer for Backend {
 
                     state.parser_info.push(parser_info.clone());
                     std::thread::spawn(ParseThread::init(ParseThread {
+                        change_set: std::collections::HashSet::new(),
                         files: imbl::HashMap::new(),
                         parser_info,
                         output: parse_send,
                         input: PeekableReceiver::new(input_recv),
                         shutdown: state.shutdown.subscribe(),
                         stuff: None,
+                        workspace: (workspace_path.to_owned(), workspace_cfg.clone()),
                     }));
                 }
             }
@@ -692,6 +845,7 @@ impl tower_lsp::LanguageServer for Backend {
 
     async fn did_close(&self, params: lsp::DidCloseTextDocumentParams) {
         let url = params.text_document.uri;
+        #[allow(unused_mut, unused_variables)]
         let mut state = self.state.lock().await;
         self.client
             .log_message(lsp::MessageType::LOG, format!("did_close {}", url))
