@@ -3,7 +3,10 @@ use tower_lsp::lsp_types as lsp;
 use xi_rope as rope;
 
 // traits
+use lrlex::LexerDef as _;
+use num_traits::ToPrimitive as _;
 use std::ops::DerefMut;
+use tokio_stream::StreamExt as _;
 
 #[derive(thiserror::Error, Debug)]
 enum ServerError {
@@ -48,9 +51,7 @@ type Workspaces = imbl::HashMap<std::path::PathBuf, WorkspaceCfg>;
 struct ParserInfo {
     id: ParserId,
     l_path: std::path::PathBuf,
-    l_contents: rope::Rope,
     y_path: std::path::PathBuf,
-    y_contents: rope::Rope,
     recovery_kind: lrpar::RecoveryKind,
     yacc_kind: cfgrammar::yacc::YaccKind,
 }
@@ -62,42 +63,175 @@ impl ParserInfo {
 }
 
 #[derive(Debug)]
-struct ParserMsg {}
+struct ParserMsg {
+    msg: &'static str,
+}
 
 type ParserId = usize;
 
+#[derive(Clone)]
+struct File {
+    contents: rope::Rope,
+    version: Option<i32>,
+}
+
+type LexTable = lrlex::LRNonStreamingLexerDef<lrlex::DefaultLexeme<u32>, u32>;
+
 struct ParseThread {
+    files: imbl::HashMap<std::path::PathBuf, File>,
     parser_info: ParserInfo,
     output: tokio::sync::mpsc::UnboundedSender<ParserMsg>,
     input: tokio::sync::mpsc::UnboundedReceiver<EditorMsg>,
     shutdown: tokio::sync::broadcast::Receiver<()>,
+    stuff: Option<(
+        LexTable,
+        cfgrammar::yacc::YaccGrammar,
+        lrtable::StateGraph<u32>,
+        lrtable::StateTable<u32>,
+    )>,
 }
 
 async fn process_parser_messages(
     client: tower_lsp::Client,
-    mut recv: tokio::sync::mpsc::UnboundedReceiver<ParserMsg>,
+    mut receivers: Vec<tokio::sync::mpsc::UnboundedReceiver<ParserMsg>>,
+    mut shutdown: tokio::sync::broadcast::Receiver<()>,
 ) {
-    loop {
-        let val_from_parser = recv.recv().await;
+    let receivers = receivers
+        .drain(..)
+        .map(tokio_stream::wrappers::UnboundedReceiverStream::new);
+    let mut receivers = tokio_stream::StreamMap::from_iter(receivers.enumerate());
+
+    while let Err(tokio::sync::broadcast::error::TryRecvError::Empty) = shutdown.try_recv() {
+        let val_from_parser = receivers.next().await;
+
         if let Some(val_from_parser) = val_from_parser {
             client
-                .log_message(
-                    lsp::MessageType::INFO,
-                    format!("sent message and received response {:?}", val_from_parser),
-                )
+                .log_message(lsp::MessageType::INFO, format!("{:?}", val_from_parser))
                 .await;
         }
     }
 }
 
 impl ParseThread {
+    fn build_stuff(
+        &self,
+        lex_contents: &str,
+        yacc_contents: &str,
+    ) -> Option<(
+        LexTable,
+        cfgrammar::yacc::YaccGrammar,
+        lrtable::StateGraph<u32>,
+        lrtable::StateTable<u32>,
+    )> {
+        if let Ok(mut lexerdef) =
+            lrlex::LRNonStreamingLexerDef::<lrlex::DefaultLexeme<u32>, u32>::from_str(lex_contents)
+        {
+            let grm = cfgrammar::yacc::YaccGrammar::new(self.parser_info.yacc_kind, yacc_contents);
+            if let Ok(grm) = grm {
+                if let Ok((stable, sgraph)) = lrtable::from_yacc(&grm, lrtable::Minimiser::Pager) {
+                    let rule_ids = &grm
+                        .tokens_map()
+                        .iter()
+                        .map(|(&n, &i)| (n, usize::from(i).to_u32().unwrap()))
+                        .collect();
+
+                    let (missing_from_lexer, missing_from_parser) = lexerdef.set_rule_ids(rule_ids);
+
+                    if let Some(tokens) = missing_from_parser {
+                        let mut sorted = tokens.iter().cloned().collect::<Vec<&str>>();
+                        sorted.sort_unstable();
+                    }
+
+                    if let Some(tokens) = missing_from_lexer {
+                        let mut sorted = tokens.iter().cloned().collect::<Vec<&str>>();
+                        sorted.sort_unstable();
+                    }
+
+                    return Some((lexerdef, grm, stable, sgraph));
+                }
+            }
+        }
+
+        None
+    }
     fn init(mut self: ParseThread) -> impl FnOnce() {
         move || {
             while let Err(tokio::sync::broadcast::error::TryRecvError::Empty) =
                 self.shutdown.try_recv()
             {
+                use EditorMsg as M;
                 if let Some(input) = self.input.blocking_recv() {
-                    self.output.send(ParserMsg {}).unwrap();
+                    match input {
+                        M::DidOpen(params) => {
+                            if let Ok(path) = params.text_document.uri.to_file_path() {
+                                self.files.insert(
+                                    path,
+                                    File {
+                                        contents: rope::Rope::from(params.text_document.text),
+                                        version: Some(params.text_document.version),
+                                    },
+                                );
+                            }
+                            self.output.send(ParserMsg { msg: "DidOpen" }).unwrap();
+                        }
+                        M::DidChange(params) => {
+                            let url = params.text_document.uri;
+                            let path = url.to_file_path();
+                            match path {
+                                Ok(path) => {
+                                    let file = self.files.entry(path.clone()).or_insert(File {
+                                        contents: rope::Rope::from(""),
+                                        version: None,
+                                    });
+                                    let rope = &mut file.contents;
+                                    for change in params.content_changes {
+                                        if let Some(range) = change.range {
+                                            let line_start_pos =
+                                                rope.offset_of_line(range.start.line as usize);
+                                            let line_end_pos =
+                                                rope.offset_of_line(range.end.line as usize);
+                                            // FIXME multibyte characters...
+                                            let start =
+                                                line_start_pos + range.start.character as usize;
+                                            let end = line_end_pos + range.end.character as usize;
+                                            rope.edit(start..end, change.text);
+                                        } else {
+                                            rope.edit(0..rope.len(), change.text);
+                                        }
+                                    }
+
+                                    if self.parser_info.l_path == path
+                                        || self.parser_info.y_path == path
+                                    {
+                                        let build = {
+                                            if let (Some(lex_file), Some(yacc_file)) = (
+                                                self.files.get(self.parser_info.l_path.as_path()),
+                                                self.files.get(self.parser_info.y_path.as_path()),
+                                            ) {
+                                                self.build_stuff(
+                                                    &lex_file.contents.to_string(),
+                                                    &yacc_file.contents.to_string(),
+                                                )
+                                            } else {
+                                                None
+                                            }
+                                        };
+
+                                        self.stuff = build;
+                                    }
+
+                                    self.output.send(ParserMsg { msg: "DidChange" }).unwrap();
+                                }
+                                Err(()) => {
+                                    self.output
+                                        .send(ParserMsg {
+                                            msg: "Error converting url to path",
+                                        })
+                                        .unwrap();
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -106,17 +240,50 @@ impl ParseThread {
 
 #[derive(Debug)]
 struct State {
-    toml: Workspaces,
-    warned_needs_restart: bool,
     client_monitor: bool,
     extensions: imbl::HashMap<std::ffi::OsString, ParserInfo>,
-    shutdown: tokio::sync::broadcast::Sender<()>,
     parser_channels: Vec<tokio::sync::mpsc::UnboundedSender<EditorMsg>>,
     parser_info: Vec<ParserInfo>,
+    shutdown: tokio::sync::broadcast::Sender<()>,
+    toml: Workspaces,
+    warned_needs_restart: bool,
+}
+
+impl State {
+    fn affected_parsers(&self, path: &std::path::Path, ids: &mut Vec<usize>) {
+        if let Some(extension) = path.extension() {
+            let id = self.extensions.get(extension).map(ParserInfo::id);
+            // A couple of corner cases here:
+            //
+            // * The kind of case where you have foo.l and bar.y/baz.y using the same lexer.
+            //    -- We should probably allow this case where editing a single file updates multiple parsers.
+            // * The kind of case where you have a yacc.y for the extension .y, so both the extension
+            //   and the parse_info have the same id.
+            //    -- We don't want to run the same parser multiple times: remove duplicates.
+            // In the general case, where you either change a .l, .y, or a file of the parsers extension
+            // this will be a vec of one element.
+            if let Some(id) = id {
+                ids.push(id);
+            }
+
+            ids.extend(
+                self.extensions
+                    .values()
+                    .filter(|parser_info| path == parser_info.l_path || path == parser_info.y_path)
+                    .map(ParserInfo::id),
+            );
+
+            ids.sort_unstable();
+            ids.dedup();
+        }
+    }
 }
 
 #[derive(Debug)]
-struct EditorMsg {}
+enum EditorMsg {
+    DidChange(lsp::DidChangeTextDocumentParams),
+    DidOpen(lsp::DidOpenTextDocumentParams),
+}
 
 fn initialize_failed(reason: String) -> jsonrpc::Result<lsp::InitializeResult> {
     Err(tower_lsp::jsonrpc::Error {
@@ -253,19 +420,15 @@ impl tower_lsp::LanguageServer for Backend {
         // construct lex/parsing tables.
         {
             let extensions = &mut state.extensions;
-
+            let mut output_channels = Vec::new();
             for (workspace_path, WorkspaceCfg { workspace, .. }) in (&state.toml).iter() {
                 for (id, parser) in workspace.parsers.get_ref().iter().enumerate() {
                     let l_path = workspace_path.join(parser.l_file.get_ref());
                     let y_path = workspace_path.join(parser.y_file.get_ref());
-                    let l_contents = std::fs::read_to_string(&l_path).expect("lex file");
-                    let y_contents = std::fs::read_to_string(&y_path).expect("yacc file");
                     let parser_info = ParserInfo {
                         id,
                         l_path,
-                        l_contents: rope::Rope::from(l_contents),
                         y_path,
-                        y_contents: rope::Rope::from(y_contents),
                         recovery_kind: parser.recovery_kind,
                         yacc_kind: parser.yacc_kind,
                     };
@@ -286,19 +449,24 @@ impl tower_lsp::LanguageServer for Backend {
                         tokio::sync::mpsc::UnboundedReceiver<ParserMsg>,
                     ) = tokio::sync::mpsc::unbounded_channel();
                     state.parser_channels.push(input_send);
+                    output_channels.push(parse_recv);
+
                     state.parser_info.push(parser_info.clone());
                     std::thread::spawn(ParseThread::init(ParseThread {
+                        files: imbl::HashMap::new(),
                         parser_info,
                         output: parse_send,
                         input: input_recv,
                         shutdown: state.shutdown.subscribe(),
+                        stuff: None,
                     }));
-                    let _ = tokio::task::spawn(process_parser_messages(
-                        self.client.clone(),
-                        parse_recv,
-                    ));
                 }
             }
+            let _ = tokio::task::spawn(process_parser_messages(
+                self.client.clone(),
+                output_channels,
+                state.shutdown.subscribe(),
+            ));
         }
 
         self.client
@@ -341,100 +509,110 @@ impl tower_lsp::LanguageServer for Backend {
     }
 
     async fn did_change(&self, params: lsp::DidChangeTextDocumentParams) {
-        // Take the lock under this block
-        {
-            let mut state = self.state.lock().await;
-            let url = params.text_document.uri.clone();
-            let path = url.to_file_path();
-            let nimbleparse_toml = std::ffi::OsStr::new("nimbleparse.toml");
-            self.client
-                .show_message(lsp::MessageType::INFO, format!("did_edit: {}", url))
-                .await;
-            match path {
-                Ok(path) if Some(nimbleparse_toml) == path.file_name() => {
-                    if !state.warned_needs_restart {
-                        self.client
-                            .show_message(
-                                lsp::MessageType::INFO,
-                                "Reload required for nimbleparse.toml changes to take effect",
-                            )
-                            .await;
-                        state.warned_needs_restart = true;
-                    }
+        let mut state = self.state.lock().await;
+        let url = params.text_document.uri.clone();
+        let path = url.to_file_path();
+        let nimbleparse_toml = std::ffi::OsStr::new("nimbleparse.toml");
+        match path {
+            Ok(path) if Some(nimbleparse_toml) == path.file_name() => {
+                if !state.warned_needs_restart {
+                    self.client
+                        .show_message(
+                            lsp::MessageType::INFO,
+                            "Reload required for nimbleparse.toml changes to take effect",
+                        )
+                        .await;
+                    state.warned_needs_restart = true;
                 }
-                Ok(path) => {
-                    let extension = path.extension();
-                    if let Some(extension) = extension {
-                        let id = state.extensions.get(extension).map(ParserInfo::id);
-                        let mut ids = vec![];
+            }
+            Ok(path) => {
+                let mut ids = vec![];
 
-                        // A couple of corner cases here:
-                        //
-                        // * The kind of case where you have foo.l and bar.y/baz.y using the same lexer.
-                        //    -- We should probably allow this case where editing a single file updates multiple parsers.
-                        // * The kind of case where you have a yacc.y for the extension .y, so both the extension
-                        //   and the parse_info have the same id.
-                        //    -- We don't want to run the same parser multiple times: remove duplicates.
-                        // In the general case, where you either change a .l, .y, or a file of the parsers extension
-                        // this will be a vec of one element.
-                        if let Some(id) = id {
-                            ids.push(id);
-                        }
+                state.affected_parsers(&path, &mut ids);
 
-                        ids.extend(
-                            state
-                                .extensions
-                                .values()
-                                .filter(|parser_info| {
-                                    path == parser_info.l_path || path == parser_info.y_path
-                                })
-                                .map(ParserInfo::id),
-                        );
+                if ids.is_empty() {
+                    self.client
+                        .log_message(
+                            lsp::MessageType::ERROR,
+                            format!(
+                                "No registered extension for changed file: {}",
+                                path.display()
+                            ),
+                        )
+                        .await;
+                }
 
-                        ids.sort_unstable();
-                        ids.dedup();
-
-                        for id in ids {
-                            let result = state.parser_channels.get_mut(id);
-                            if let Some(send) = result {
-                                send.send(EditorMsg {}).unwrap();
-                            } else {
-                                self.client
-                                    .log_message(
-                                        lsp::MessageType::ERROR,
-                                        format!(
-                                            "Internal error: no channel for parser: {:?}",
-                                            state.parser_info[id]
-                                        ),
-                                    )
-                                    .await;
-                            }
-                        }
+                for id in &ids {
+                    let result = state.parser_channels.get_mut(*id);
+                    if let Some(send) = result {
+                        send.send(EditorMsg::DidChange(params.clone())).unwrap();
                     } else {
                         self.client
                             .log_message(
                                 lsp::MessageType::ERROR,
-                                format!("No extension for changed file: {}", path.display()),
+                                format!(
+                                    "Internal error: no channel for parser: {:?}",
+                                    state.parser_info[*id]
+                                ),
                             )
                             .await;
                     }
                 }
-                Err(()) => {
-                    self.client
-                        .log_message(
-                            lsp::MessageType::LOG,
-                            format!("error: converting url to path: {}", url),
-                        )
-                        .await;
-                }
             }
-        }; // Release the lock.
+            Err(()) => {
+                self.client
+                    .log_message(
+                        lsp::MessageType::LOG,
+                        format!("error: converting url to path: {}", url),
+                    )
+                    .await;
+            }
+        }
     }
 
     async fn did_open(&self, params: lsp::DidOpenTextDocumentParams) {
-        let url = params.text_document.uri;
-        let state = self.state.lock().await;
-        let rope = rope::Rope::from(params.text_document.text);
+        let mut state = self.state.lock().await;
+        let url = params.text_document.uri.clone();
+        let path = url.to_file_path();
+        match path {
+            Ok(path) => {
+                let mut ids = vec![];
+
+                state.affected_parsers(&path, &mut ids);
+
+                if ids.is_empty() {
+                    self.client
+                        .log_message(
+                            lsp::MessageType::ERROR,
+                            format!(
+                                "No registered extension for opened file: {}",
+                                path.display()
+                            ),
+                        )
+                        .await;
+                }
+
+                for id in &ids {
+                    let channel = state.parser_channels.get_mut(*id);
+                    if let Some(channel) = channel {
+                        if let Err(e) = channel.send(EditorMsg::DidOpen(params.clone())) {
+                            self.client
+                                .log_message(
+                                    lsp::MessageType::LOG,
+                                    format!("did_open error: {}", e),
+                                )
+                                .await;
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                self.client
+                    .log_message(lsp::MessageType::LOG, format!("did_open error: {:?}", e))
+                    .await;
+            }
+        }
+
         self.client
             .log_message(lsp::MessageType::LOG, format!("did_open {}", &url))
             .await;
