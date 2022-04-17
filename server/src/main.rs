@@ -54,6 +54,7 @@ struct ParserInfo {
     y_path: std::path::PathBuf,
     recovery_kind: lrpar::RecoveryKind,
     yacc_kind: cfgrammar::yacc::YaccKind,
+    extension: std::ffi::OsString,
 }
 
 impl ParserInfo {
@@ -64,12 +65,12 @@ impl ParserInfo {
 
 #[derive(Debug)]
 struct ParserMsg {
-    msg: &'static str,
+    msg: String,
 }
 
 type ParserId = usize;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct File {
     contents: rope::Rope,
     version: Option<i32>,
@@ -81,7 +82,7 @@ struct ParseThread {
     files: imbl::HashMap<std::path::PathBuf, File>,
     parser_info: ParserInfo,
     output: tokio::sync::mpsc::UnboundedSender<ParserMsg>,
-    input: tokio::sync::mpsc::UnboundedReceiver<EditorMsg>,
+    input: PeekableReceiver<EditorMsg>,
     shutdown: tokio::sync::broadcast::Receiver<()>,
     stuff: Option<(
         LexTable,
@@ -89,6 +90,48 @@ struct ParseThread {
         lrtable::StateGraph<u32>,
         lrtable::StateTable<u32>,
     )>,
+}
+
+struct PeekableReceiver<T> {
+    peeked: Option<T>,
+    rx: tokio::sync::mpsc::UnboundedReceiver<T>,
+}
+
+impl<T> PeekableReceiver<T> {
+    fn new(rx: tokio::sync::mpsc::UnboundedReceiver<T>) -> PeekableReceiver<T> {
+        PeekableReceiver { peeked: None, rx }
+    }
+
+    pub fn peek(&mut self) -> Option<&T> {
+        if self.peeked.is_none() {
+            if let Ok(x) = self.rx.try_recv() {
+                self.peeked = Some(x);
+                self.peeked.as_ref()
+            } else {
+                None
+            }
+        } else {
+            self.peeked.as_ref()
+        }
+    }
+
+    pub fn try_recv(&mut self) -> Result<T, tokio::sync::mpsc::error::TryRecvError> {
+        if let Some(x) = self.peeked.take() {
+            self.peeked = None;
+            Ok(x)
+        } else {
+            self.rx.try_recv()
+        }
+    }
+
+    pub fn blocking_recv(&mut self) -> Option<T> {
+        if let Some(x) = self.peeked.take() {
+            self.peeked = None;
+            Some(x)
+        } else {
+            self.rx.blocking_recv()
+        }
+    }
 }
 
 async fn process_parser_messages(
@@ -110,6 +153,12 @@ async fn process_parser_messages(
                 .await;
         }
     }
+}
+
+#[derive(Clone, Debug, Hash, PartialOrd, PartialEq, Ord, Eq)]
+enum Change<'a> {
+    ParserForExtension(&'a std::ffi::OsStr),
+    File(std::path::PathBuf),
 }
 
 impl ParseThread {
@@ -156,6 +205,7 @@ impl ParseThread {
     }
     fn init(mut self: ParseThread) -> impl FnOnce() {
         move || {
+            let mut change_set = imbl::HashSet::new();
             while let Err(tokio::sync::broadcast::error::TryRecvError::Empty) =
                 self.shutdown.try_recv()
             {
@@ -172,11 +222,16 @@ impl ParseThread {
                                     },
                                 );
                             }
-                            self.output.send(ParserMsg { msg: "DidOpen" }).unwrap();
+                            self.output
+                                .send(ParserMsg {
+                                    msg: "DidOpen".to_string(),
+                                })
+                                .unwrap();
                         }
                         M::DidChange(params) => {
                             let url = params.text_document.uri;
                             let path = url.to_file_path();
+
                             match path {
                                 Ok(path) => {
                                     let file = self.files.entry(path.clone()).or_insert(File {
@@ -216,16 +271,35 @@ impl ParseThread {
                                                 None
                                             }
                                         };
-
+                                        change_set.clear();
+                                        change_set.insert(Change::ParserForExtension(
+                                            &self.parser_info.extension,
+                                        ));
                                         self.stuff = build;
+                                    } else {
+                                        change_set.insert(Change::File(path));
                                     }
-
-                                    self.output.send(ParserMsg { msg: "DidChange" }).unwrap();
+                                    self.output
+                                        .send(ParserMsg {
+                                            msg: "DidChange".to_string(),
+                                        })
+                                        .unwrap();
+                                    let mut files = self.files.iter();
+                                    while self.input.peek().is_none() {
+                                        if let Some((path, file)) = files.next() {
+                                            self.output
+                                                .send(ParserMsg {
+                                                    msg: format!("parsing: {}", path.display()),
+                                                })
+                                                .unwrap();
+                                            std::thread::sleep(std::time::Duration::from_secs(1));
+                                        }
+                                    }
                                 }
                                 Err(()) => {
                                     self.output
                                         .send(ParserMsg {
-                                            msg: "Error converting url to path",
+                                            msg: "Error converting url to path".to_string(),
                                         })
                                         .unwrap();
                                 }
@@ -425,12 +499,16 @@ impl tower_lsp::LanguageServer for Backend {
                 for (id, parser) in workspace.parsers.get_ref().iter().enumerate() {
                     let l_path = workspace_path.join(parser.l_file.get_ref());
                     let y_path = workspace_path.join(parser.y_file.get_ref());
+                    let extension = parser.extension.clone().into_inner();
+                    let extension = std::ffi::OsStr::new(&extension);
+
                     let parser_info = ParserInfo {
                         id,
                         l_path,
                         y_path,
                         recovery_kind: parser.recovery_kind,
                         yacc_kind: parser.yacc_kind,
+                        extension: extension.to_owned(),
                     };
                     let inner = parser.extension.clone().into_inner();
                     let extension_str = inner
@@ -440,14 +518,8 @@ impl tower_lsp::LanguageServer for Backend {
                     let extension = std::ffi::OsStr::new(&extension_str);
 
                     extensions.insert(extension.to_os_string(), parser_info.clone());
-                    let (input_send, input_recv): (
-                        tokio::sync::mpsc::UnboundedSender<EditorMsg>,
-                        tokio::sync::mpsc::UnboundedReceiver<EditorMsg>,
-                    ) = tokio::sync::mpsc::unbounded_channel();
-                    let (parse_send, parse_recv): (
-                        tokio::sync::mpsc::UnboundedSender<ParserMsg>,
-                        tokio::sync::mpsc::UnboundedReceiver<ParserMsg>,
-                    ) = tokio::sync::mpsc::unbounded_channel();
+                    let (input_send, input_recv) = tokio::sync::mpsc::unbounded_channel();
+                    let (parse_send, parse_recv) = tokio::sync::mpsc::unbounded_channel();
                     state.parser_channels.push(input_send);
                     output_channels.push(parse_recv);
 
@@ -456,7 +528,7 @@ impl tower_lsp::LanguageServer for Backend {
                         files: imbl::HashMap::new(),
                         parser_info,
                         output: parse_send,
-                        input: input_recv,
+                        input: PeekableReceiver::new(input_recv),
                         shutdown: state.shutdown.subscribe(),
                         stuff: None,
                     }));
