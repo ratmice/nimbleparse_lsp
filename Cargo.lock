@@ -811,6 +811,7 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio",
+ "tokio-stream",
  "toml",
  "tower-lsp",
  "xi-rope",
