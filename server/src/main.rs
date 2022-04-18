@@ -131,7 +131,11 @@ enum Change {
 }
 
 impl ParseThread {
-    fn maybe_build_stuff(&mut self, path: &std::path::Path) {
+    // Assumes that the updated path is already modified in the `files` hashmap.
+    // If `path` is a lexer or yacc file it mutates self updating the parser tables.
+    // if the parser tables are updated, update the change_set to reparse all things with
+    // the appropriate file extension.  Otherwise add the changed file to the change_set.
+    fn changed_file(&mut self, path: &std::path::Path) {
         let (workspace_path, workspace_cfg) = &self.workspace;
         if self.parser_info.l_path == path || self.parser_info.y_path == path {
             self.stuff = {
@@ -252,7 +256,7 @@ impl ParseThread {
                     },
                 );
                 let y_path = self.parser_info.y_path.clone();
-                self.maybe_build_stuff(&y_path);
+                self.changed_file(&y_path);
             }
             let mut block = false;
 
@@ -275,7 +279,7 @@ impl ParseThread {
                                     },
                                 );
 
-                                self.maybe_build_stuff(&path);
+                                self.changed_file(&path);
                             }
                             self.output
                                 .send(ParserMsg::Info("DidOpen".to_string()))
@@ -308,7 +312,7 @@ impl ParseThread {
                                         }
                                     }
 
-                                    self.maybe_build_stuff(&path);
+                                    self.changed_file(&path);
                                     self.output
                                         .send(ParserMsg::Info(format!(
                                             "DidChange: {}",
