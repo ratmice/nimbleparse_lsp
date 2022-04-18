@@ -1,3 +1,5 @@
+use cfgrammar::yacc;
+use cfgrammar::yacc::YaccOriginalKind;
 use tower_lsp::jsonrpc;
 use tower_lsp::lsp_types as lsp;
 use xi_rope as rope;
@@ -53,7 +55,7 @@ struct ParserInfo {
     l_path: std::path::PathBuf,
     y_path: std::path::PathBuf,
     recovery_kind: lrpar::RecoveryKind,
-    yacc_kind: cfgrammar::yacc::YaccKind,
+    yacc_kind: yacc::YaccKind,
     extension: std::ffi::OsString,
 }
 
@@ -389,25 +391,31 @@ impl ParseThread {
                                         lrpar::RTParserBuilder::new(grm, stable)
                                             .recoverer(self.parser_info.recovery_kind);
 
+                                    #[rustfmt::skip]
                                     match self.parser_info.yacc_kind {
-                                    cfgrammar::yacc::YaccKind::Original(cfgrammar::yacc::YaccOriginalActionKind::NoAction) => {
-                                        self.output
-                                            .send(ParserMsg::Parsed(
-                                                file_path.to_owned(),
-                                                None,
-                                                pb.parse_noaction(&lexer),
-                                                now.elapsed(),
-                                            ))
-                                            .unwrap();
-                                    },
-                                    cfgrammar::yacc::YaccKind::Original(cfgrammar::yacc::YaccOriginalActionKind::GenericParseTree) => {
-                                        let (pt, errors) = pb.parse_generictree(&lexer);
-                                        self.output
-                                            .send(ParserMsg::Parsed(file_path.to_owned(), pt, errors, now.elapsed()))
-                                            .unwrap();
+                                        yacc::YaccKind::Original(YaccOriginalActionKind::NoAction) => {
+                                            self.output
+                                                .send(ParserMsg::Parsed(
+                                                    file_path.to_owned(),
+                                                    None,
+                                                    pb.parse_noaction(&lexer),
+                                                    now.elapsed(),
+                                                ))
+                                                .unwrap();
+                                        },
+                                        yacc::YaccKind::Original(YaccOriginalActionKind::GenericParseTree) => {
+                                            let (pt, errors) = pb.parse_generictree(&lexer);
+                                            self.output
+                                                .send(ParserMsg::Parsed(
+                                                    file_path.to_owned(),
+                                                    pt,
+                                                    errors,
+                                                    now.elapsed(),
+                                                ))
+                                                .unwrap();
+                                        },
+                                        _ => {}
                                     }
-                                    _ => {}
-                                }
                                 }
                             }
                         }
@@ -429,8 +437,10 @@ impl ParseThread {
                                         let lexer = lexerdef.lexer(&contents);
                                         let pb = lrpar::RTParserBuilder::new(grm, stable)
                                             .recoverer(self.parser_info.recovery_kind);
+
+                                        #[rustfmt::skip]
                                         match self.parser_info.yacc_kind {
-                                            cfgrammar::yacc::YaccKind::Original(cfgrammar::yacc::YaccOriginalActionKind::NoAction) => {
+                                            YaccKind::Original(YaccOriginalActionKind::NoAction) => {
                                                 self.output
                                                     .send(ParserMsg::Parsed(
                                                         path.to_owned(),
@@ -440,14 +450,18 @@ impl ParseThread {
                                                     ))
                                                     .unwrap();
                                             }
-                                            cfgrammar::yacc::YaccKind::Original(cfgrammar::yacc::YaccOriginalActionKind::GenericParseTree) => {
+                                            YaccKind::Original(YaccOriginalActionKind::GenericParseTree) => {
                                                 let (pt, errors) = pb.parse_generictree(&lexer);
                                                 self.output
-                                                    .send(ParserMsg::Parsed(path.to_owned(), pt, errors, now.elapsed()))
+                                                    .send(ParserMsg::Parsed(
+                                                        path.to_owned(),
+                                                        pt,
+                                                        errors,
+                                                        now.elapsed(),
+                                                    ))
                                                     .unwrap();
                                             }
-                                            _ => {
-                                            }
+                                            _ => {}
                                         }
                                     } else {
                                         continue 'top;
