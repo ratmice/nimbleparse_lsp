@@ -1,9 +1,24 @@
+## Purpose
+
+Primarily intended for the development of grammars.
+It seeks to remove any/all extraneous steps between editing a grammar testing it.
+It does not run generate source code, compile the sources, or run actions embedded in the grammar.
+While actions get ignored you can optionally build a generic syntax tree.
+
+Reparsing is performed on the editors buffer, on change, so you do not need to save the changes to reparse.
+
+
+Error recovery is optional (enabled by default), but will be slower than disabling it.
+
+## Features
+
+* Parse test input on lex/yacc file change.
+* Parse test input on test input change.
+
 ## Editor support
 
-Currently the only editor supported is vscode.
-Because we deal not with a hard coded file extension,
-but an extension which gets discovered from a workspace.
-This  requires some amount of support from the editor.
+VSCode will automatically discover and register for the test input file extension
+Other editors require hard coding of the test input file extension.
 
 
 | Editor  | supported | caveats |
@@ -49,3 +64,6 @@ Then follow the configuration in [neovim/](neovim/README.md)
 
 ## Developer options
 Append `--console` to the install command, to enable tokio-console support. 
+
+## Projects
+[Crimson](https://github.com/ratmice/crimson)
