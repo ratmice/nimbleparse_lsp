@@ -112,10 +112,26 @@ impl ParseThread {
         }
     }
 
+    fn check_extension_changes(
+        &self,
+        path: &std::path::Path,
+        change_set: &std::collections::HashSet<Change>,
+    ) -> bool {
+        let extension = path.extension();
+        let parent = path.parent();
+        let has_extension = change_set.iter().find(|change| match change {
+            Change::Extension(change_extension, change_dir_path, _) => {
+                extension == Some(change_extension) && parent == Some(change_dir_path)
+            }
+            _ => false,
+        });
+        has_extension.is_some()
+    }
+
     fn parse_file(
         &self,
         file: &File,
-        path: &std::path::PathBuf,
+        path: &std::path::Path,
         lexerdef: &LexTable,
         pb: &lrpar::RTParserBuilder<lrlex::DefaultLexeme<u32>, u32>,
     ) {
@@ -249,10 +265,7 @@ impl ParseThread {
                                                 .recoverer(self.parser_info.recovery_kind),
                                         );
                                     }
-                                } else {
-                                    // FIXME: this should check if it contains an extension for the path.
-                                    // Should probably get rid of the test_dir aspects of Change.
-                                    // to make this cleaner.
+                                } else if !self.check_extension_changes(&path, &change_set) {
                                     change_set.insert(Change::File(path.to_path_buf()));
                                 }
                             }
@@ -302,11 +315,8 @@ impl ParseThread {
                                                     .recoverer(self.parser_info.recovery_kind),
                                             );
                                         }
-                                    } else {
-                                        // FIXME: this should check if it contains an extension for the path.
-                                        // Should probably get rid of the test_dir aspects of Change.
-                                        // to make this cleaner.
-                                        change_set.insert(Change::File(path.to_path_buf()));
+                                    } else if !self.check_extension_changes(&path, &change_set) {
+                                           change_set.insert(Change::File(path.to_path_buf()));
                                     }
                                 }
                                 Err(()) => {
@@ -322,12 +332,12 @@ impl ParseThread {
                 }
                 if let Some((lexerdef, _, _, _)) = &stuff {
                     if let Some(pb) = &pb {
-                        'change: for change in change_set.drain() {
+                        'change: for change in &change_set.clone() {
                             match change {
                                 Change::File(path) => {
-                                    let file = files.get(&path);
+                                    let file = files.get(path);
                                     if let Some(file) = file {
-                                        self.parse_file(file, &path, lexerdef, pb)
+                                        self.parse_file(file, path, lexerdef, pb)
                                     } else {
                                         self.output
                                             .send(ParserMsg::Info(format!(
@@ -342,7 +352,7 @@ impl ParseThread {
                                         files.iter().filter(|(test_path, _file)| {
                                             test_path.extension()
                                                 == Some(&self.parser_info.extension)
-                                                && test_path.parent() == Some(&test_dir_path)
+                                                && test_path.parent() == Some(test_dir_path)
                                         });
 
                                     loop {
@@ -353,6 +363,7 @@ impl ParseThread {
                                         if let Some((path, file)) = filter_files.next() {
                                             self.parse_file(file, path, lexerdef, pb)
                                         } else {
+                                            change_set.remove(change);
                                             continue 'change;
                                         }
                                     }
