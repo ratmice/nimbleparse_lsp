@@ -88,6 +88,9 @@ impl ParseThread {
         }
     }
 
+    // Currently we rebuild the lexer even if just the parser changed
+    // There are some assumptions on the initial parse on startup.
+    // Would need to update that if changing behavior.
     fn build_stuff(
         &self,
         lex_contents: &str,
@@ -176,8 +179,11 @@ impl ParseThread {
                         _version: None,
                     },
                 );
-                let y_path = self.parser_info.y_path.clone();
-                self.changed_file(&y_path);
+                let l_path = self.parser_info.l_path.clone();
+                // The choice of l_path is arbitrary, but
+                // We don't `self.changed_file(&y_path)` because that would actually rebuild parser multiple times.
+                // but building l_path should imply rebuilding the parser from the changed or unchanged y_path.
+                self.changed_file(&l_path);
             }
             let mut block = false;
 
