@@ -307,7 +307,6 @@ impl tower_lsp::LanguageServer for Backend {
                         output: parse_send,
                         input: peek_channel::PeekableReceiver::new(input_recv),
                         shutdown: state.shutdown.subscribe(),
-                        stuff: None,
                         workspace: (workspace_path.to_owned(), workspace_cfg.clone()),
                     }));
                 }
