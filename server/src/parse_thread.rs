@@ -44,7 +44,7 @@ pub struct ParseThread {
 impl ParseThread {
     fn updated_lex_or_yacc_file(
         self: &mut ParseThread,
-        change_set: &mut std::collections::HashSet<Change>,
+        change_set: &mut imbl::HashSet<Change>,
         files: &imbl::HashMap<std::path::PathBuf, File>,
         stuff: &mut Option<(
             LexTable,
@@ -115,7 +115,7 @@ impl ParseThread {
     fn check_extension_changes(
         &self,
         path: &std::path::Path,
-        change_set: &std::collections::HashSet<Change>,
+        change_set: &imbl::HashSet<Change>,
     ) -> bool {
         let extension = path.extension();
         let parent = path.parent();
@@ -168,8 +168,9 @@ impl ParseThread {
     pub fn init(mut self: ParseThread) -> impl FnOnce() {
         move || {
             let mut files: imbl::HashMap<std::path::PathBuf, File> = imbl::HashMap::new();
-            let mut change_set: std::collections::HashSet<Change> =
-                std::collections::HashSet::new();
+            let mut change_set: imbl::HashSet<Change> = imbl::HashSet::new();
+            let mut completed_changes: imbl::HashSet<Change> = imbl::HashSet::new();
+            let mut synthetic_changes: imbl::HashSet<Change> = imbl::HashSet::new();
             let (workspace_path, workspace_cfg) = &self.workspace;
             let test_dirs = &workspace_cfg.workspace.tests;
             for nimbleparse_toml::TestDir { dir, .. } in test_dirs {
@@ -255,7 +256,7 @@ impl ParseThread {
                                 {
                                     pb = None;
                                     self.updated_lex_or_yacc_file(
-                                        &mut change_set,
+                                        &mut change_set.clone(),
                                         &files,
                                         &mut stuff,
                                     );
@@ -265,8 +266,16 @@ impl ParseThread {
                                                 .recoverer(self.parser_info.recovery_kind),
                                         );
                                     }
-                                } else if !self.check_extension_changes(&path, &change_set) {
-                                    change_set.insert(Change::File(path.to_path_buf()));
+                                    // change_set taken care of by updated_lex...
+                                    completed_changes.clear();
+                                    synthetic_changes.clear();
+                                } else {
+                                    let change = Change::File(path.to_path_buf());
+                                    completed_changes.remove(&change);
+                                    synthetic_changes.remove(&change);
+                                    if !self.check_extension_changes(&path, &change_set) {
+                                        change_set.insert(change);
+                                    }
                                 }
                             }
                             self.output
@@ -315,8 +324,15 @@ impl ParseThread {
                                                     .recoverer(self.parser_info.recovery_kind),
                                             );
                                         }
-                                    } else if !self.check_extension_changes(&path, &change_set) {
-                                        change_set.insert(Change::File(path.to_path_buf()));
+                                        completed_changes.clear();
+                                        synthetic_changes.clear();
+                                    } else {
+                                        let change = Change::File(path.to_path_buf());
+                                        completed_changes.remove(&change);
+                                        synthetic_changes.remove(&change);
+                                        if !self.check_extension_changes(&path, &change_set) {
+                                            change_set.insert(change);
+                                        }
                                     }
                                 }
                                 Err(()) => {
@@ -332,12 +348,15 @@ impl ParseThread {
                 }
                 if let Some((lexerdef, _, _, _)) = &stuff {
                     if let Some(pb) = &pb {
-                        'change: for change in &change_set.clone() {
+                        let rel_comp = change_set
+                            .clone()
+                            .relative_complement(completed_changes.clone());
+                        'change: for change in &rel_comp {
                             match change {
                                 Change::File(path) => {
                                     let file = files.get(path);
                                     if let Some(file) = file {
-                                        self.parse_file(file, path, lexerdef, pb)
+                                        self.parse_file(file, path, lexerdef, pb);
                                     } else {
                                         self.output
                                             .send(ParserMsg::Info(format!(
@@ -361,15 +380,24 @@ impl ParseThread {
                                         }
 
                                         if let Some((path, file)) = filter_files.next() {
-                                            self.parse_file(file, path, lexerdef, pb)
+                                            if !synthetic_changes
+                                                .contains(&Change::File(path.to_path_buf()))
+                                            {
+                                                self.parse_file(file, path, lexerdef, pb);
+                                                synthetic_changes
+                                                    .insert(Change::File(path.to_path_buf()));
+                                            }
                                         } else {
-                                            change_set.remove(change);
+                                            completed_changes.insert(change.clone());
                                             continue 'change;
                                         }
                                     }
                                 }
                             }
                         }
+                        change_set.clear();
+                        completed_changes.clear();
+                        synthetic_changes.clear();
                     }
                 }
             }
