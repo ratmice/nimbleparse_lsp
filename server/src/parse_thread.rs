@@ -316,7 +316,7 @@ impl ParseThread {
                                             );
                                         }
                                     } else if !self.check_extension_changes(&path, &change_set) {
-                                           change_set.insert(Change::File(path.to_path_buf()));
+                                        change_set.insert(Change::File(path.to_path_buf()));
                                     }
                                 }
                                 Err(()) => {
