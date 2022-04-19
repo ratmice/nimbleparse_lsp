@@ -301,8 +301,6 @@ impl tower_lsp::LanguageServer for Backend {
 
                     state.parser_info.push(parser_info.clone());
                     std::thread::spawn(ParseThread::init(ParseThread {
-                        change_set: std::collections::HashSet::new(),
-                        files: imbl::HashMap::new(),
                         parser_info,
                         output: parse_send,
                         input: peek_channel::PeekableReceiver::new(input_recv),
