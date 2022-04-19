@@ -42,96 +42,78 @@ pub struct ParseThread {
     pub output: tokio::sync::mpsc::UnboundedSender<ParserMsg>,
     pub input: peek_channel::PeekableReceiver<EditorMsg>,
     pub shutdown: tokio::sync::broadcast::Receiver<()>,
-    pub stuff: Option<(
-        LexTable,
-        yacc::YaccGrammar,
-        lrtable::StateGraph<u32>,
-        lrtable::StateTable<u32>,
-    )>,
     pub workspace: (std::path::PathBuf, WorkspaceCfg),
 }
 
 impl ParseThread {
-    // Assumes that the updated path is already modified in the `files` hashmap.
-    // If `path` is a lexer or yacc file it mutates self updating the parser tables.
-    // if the parser tables are updated, update the change_set to reparse all things with
-    // the appropriate file extension.  Otherwise add the changed file to the change_set.
-    fn changed_file(&mut self, path: &std::path::Path) {
+    fn updated_lex_or_yacc_file(
+        self: &mut ParseThread,
+        stuff: &mut Option<(
+            LexTable,
+            yacc::YaccGrammar,
+            lrtable::StateGraph<u32>,
+            lrtable::StateTable<u32>,
+        )>,
+    ) {
         let (workspace_path, workspace_cfg) = &self.workspace;
-        if self.parser_info.l_path == path || self.parser_info.y_path == path {
-            self.stuff = {
-                if let (Some(lex_file), Some(yacc_file)) = (
-                    self.files.get(self.parser_info.l_path.as_path()),
-                    self.files.get(self.parser_info.y_path.as_path()),
-                ) {
-                    self.build_stuff(
-                        &lex_file.contents.to_string(),
-                        &yacc_file.contents.to_string(),
-                    )
+
+        if let (Some(lex_file), Some(yacc_file)) = (
+            self.files.get(self.parser_info.l_path.as_path()),
+            self.files.get(self.parser_info.y_path.as_path()),
+        ) {
+            if let Ok(mut lexerdef) =
+                lrlex::LRNonStreamingLexerDef::<lrlex::DefaultLexeme<u32>, u32>::from_str(
+                    &lex_file.contents.to_string(),
+                )
+            {
+                let grm = yacc::YaccGrammar::new(
+                    self.parser_info.yacc_kind,
+                    &yacc_file.contents.to_string(),
+                );
+                if let Ok(grm) = grm {
+                    if let Ok((sgraph, stable)) =
+                        lrtable::from_yacc(&grm, lrtable::Minimiser::Pager)
+                    {
+                        let rule_ids = &grm
+                            .tokens_map()
+                            .iter()
+                            .map(|(&n, &i)| (n, usize::from(i).to_u32().unwrap()))
+                            .collect();
+
+                        let (missing_from_lexer, missing_from_parser) =
+                            lexerdef.set_rule_ids(rule_ids);
+
+                        if let Some(tokens) = missing_from_parser {
+                            let mut sorted = tokens.iter().cloned().collect::<Vec<&str>>();
+                            sorted.sort_unstable();
+                        }
+
+                        if let Some(tokens) = missing_from_lexer {
+                            let mut sorted = tokens.iter().cloned().collect::<Vec<&str>>();
+                            sorted.sort_unstable();
+                        }
+
+                        stuff.replace((lexerdef, grm, sgraph, stable));
+                    } else {
+                        let _ = stuff.take();
+                    }
                 } else {
-                    None
+                    let _ = stuff.take();
                 }
-            };
-            self.change_set.clear();
-            for test_dir in &workspace_cfg.workspace.tests {
-                self.change_set.insert(Change::Extension(
-                    self.parser_info.extension.clone(),
-                    workspace_path.join(test_dir.dir.clone().into_inner()),
-                    test_dir.pass,
-                ));
+            } else {
+                let _ = stuff.take();
             }
-        } else {
-            // FIXME: this should check if it contains an extension for the path.
-            // Should probably get rid of the test_dir aspects of Change.
-            // to make this cleaner.
-            self.change_set.insert(Change::File(path.to_path_buf()));
+        };
+        self.change_set.clear();
+        for test_dir in &workspace_cfg.workspace.tests {
+            self.change_set.insert(Change::Extension(
+                self.parser_info.extension.clone(),
+                workspace_path.join(test_dir.dir.clone().into_inner()),
+                test_dir.pass,
+            ));
         }
     }
 
-    // Currently we rebuild the lexer even if just the parser changed
-    // There are some assumptions on the initial parse on startup.
-    // Would need to update that if changing behavior.
-    fn build_stuff(
-        &self,
-        lex_contents: &str,
-        yacc_contents: &str,
-    ) -> Option<(
-        LexTable,
-        yacc::YaccGrammar,
-        lrtable::StateGraph<u32>,
-        lrtable::StateTable<u32>,
-    )> {
-        if let Ok(mut lexerdef) =
-            lrlex::LRNonStreamingLexerDef::<lrlex::DefaultLexeme<u32>, u32>::from_str(lex_contents)
-        {
-            let grm = yacc::YaccGrammar::new(self.parser_info.yacc_kind, yacc_contents);
-            if let Ok(grm) = grm {
-                if let Ok((stable, sgraph)) = lrtable::from_yacc(&grm, lrtable::Minimiser::Pager) {
-                    let rule_ids = &grm
-                        .tokens_map()
-                        .iter()
-                        .map(|(&n, &i)| (n, usize::from(i).to_u32().unwrap()))
-                        .collect();
-
-                    let (missing_from_lexer, missing_from_parser) = lexerdef.set_rule_ids(rule_ids);
-
-                    if let Some(tokens) = missing_from_parser {
-                        let mut sorted = tokens.iter().cloned().collect::<Vec<&str>>();
-                        sorted.sort_unstable();
-                    }
-
-                    if let Some(tokens) = missing_from_lexer {
-                        let mut sorted = tokens.iter().cloned().collect::<Vec<&str>>();
-                        sorted.sort_unstable();
-                    }
-
-                    return Some((lexerdef, grm, stable, sgraph));
-                }
-            }
-        }
-
-        None
-    }
     pub fn init(mut self: ParseThread) -> impl FnOnce() {
         move || {
             let (workspace_path, workspace_cfg) = &self.workspace;
@@ -163,8 +145,15 @@ impl ParseThread {
 
             let l_contents = std::fs::read_to_string(self.parser_info.l_path.as_path());
             let y_contents = std::fs::read_to_string(self.parser_info.y_path.as_path());
+            let mut pb: Option<lrpar::RTParserBuilder<lrlex::DefaultLexeme<u32>, u32>> = None;
+            let mut stuff: Option<(
+                LexTable,
+                yacc::YaccGrammar,
+                lrtable::StateGraph<u32>,
+                lrtable::StateTable<u32>,
+            )> = None;
 
-            if let (Ok(l_contents), Ok(y_contents)) = (l_contents, y_contents) {
+            if let (Ok(l_contents), Ok(y_contents)) = (&l_contents, &y_contents) {
                 self.files.insert(
                     self.parser_info.l_path.clone(),
                     File {
@@ -179,11 +168,13 @@ impl ParseThread {
                         _version: None,
                     },
                 );
-                let l_path = self.parser_info.l_path.clone();
-                // The choice of l_path is arbitrary, but
-                // We don't `self.changed_file(&y_path)` because that would actually rebuild parser multiple times.
-                // but building l_path should imply rebuilding the parser from the changed or unchanged y_path.
-                self.changed_file(&l_path);
+                self.updated_lex_or_yacc_file(&mut stuff);
+                if let Some((_, grm, _, stable)) = &stuff {
+                    pb.replace(
+                        lrpar::RTParserBuilder::new(grm, stable)
+                            .recoverer(self.parser_info.recovery_kind),
+                    );
+                }
             }
             let mut block = false;
 
@@ -205,8 +196,23 @@ impl ParseThread {
                                         _version: Some(params.text_document.version),
                                     },
                                 );
-
-                                self.changed_file(&path);
+                                if self.parser_info.l_path == path
+                                    || self.parser_info.y_path == path
+                                {
+                                    pb = None;
+                                    self.updated_lex_or_yacc_file(&mut stuff);
+                                    if let Some((_, grm, _, stable)) = &stuff {
+                                        pb.replace(
+                                            lrpar::RTParserBuilder::new(grm, stable)
+                                                .recoverer(self.parser_info.recovery_kind),
+                                        );
+                                    }
+                                } else {
+                                    // FIXME: this should check if it contains an extension for the path.
+                                    // Should probably get rid of the test_dir aspects of Change.
+                                    // to make this cleaner.
+                                    self.change_set.insert(Change::File(path.to_path_buf()));
+                                }
                             }
                             self.output
                                 .send(ParserMsg::Info("DidOpen".to_string()))
@@ -239,7 +245,24 @@ impl ParseThread {
                                         }
                                     }
 
-                                    self.changed_file(&path);
+                                    if self.parser_info.l_path == path
+                                        || self.parser_info.y_path == path
+                                    {
+                                        pb = None;
+                                        self.updated_lex_or_yacc_file(&mut stuff);
+                                        if let Some((_, grm, _, stable)) = &stuff {
+                                            pb.replace(
+                                                lrpar::RTParserBuilder::new(grm, stable)
+                                                    .recoverer(self.parser_info.recovery_kind),
+                                            );
+                                        }
+                                    } else {
+                                        // FIXME: this should check if it contains an extension for the path.
+                                        // Should probably get rid of the test_dir aspects of Change.
+                                        // to make this cleaner.
+                                        self.change_set.insert(Change::File(path.to_path_buf()));
+                                    }
+
                                     self.output
                                         .send(ParserMsg::Info(format!(
                                             "DidChange: {}",
@@ -258,90 +281,37 @@ impl ParseThread {
                         }
                     }
                 }
-
-                'change: for change in self.change_set.drain() {
-                    match change {
-                        Change::File(file_path) => {
-                            let file = self.files.get(&file_path);
-                            if let Some(file) = file {
-                                if let Some((lexerdef, grm, _, stable)) = &self.stuff {
-                                    let now = std::time::Instant::now();
-                                    let input = file.contents.to_string();
-                                    let lexer = lexerdef.lexer(&input);
-                                    let pb: lrpar::RTParserBuilder<lrlex::DefaultLexeme, u32> =
-                                        lrpar::RTParserBuilder::new(grm, stable)
-                                            .recoverer(self.parser_info.recovery_kind);
-
-                                    match self.parser_info.yacc_kind {
-                                        yacc::YaccKind::Original(
-                                            YaccOriginalActionKind::NoAction,
-                                        ) => {
-                                            self.output
-                                                .send(ParserMsg::Parsed(
-                                                    file_path.to_owned(),
-                                                    None,
-                                                    pb.parse_noaction(&lexer),
-                                                    now.elapsed(),
-                                                ))
-                                                .unwrap();
-                                        }
-                                        yacc::YaccKind::Original(
-                                            YaccOriginalActionKind::GenericParseTree,
-                                        ) => {
-                                            let (pt, errors) = pb.parse_generictree(&lexer);
-                                            self.output
-                                                .send(ParserMsg::Parsed(
-                                                    file_path.to_owned(),
-                                                    pt,
-                                                    errors,
-                                                    now.elapsed(),
-                                                ))
-                                                .unwrap();
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                            }
-                        }
-                        Change::Extension(_extension, test_dir_path, _pass) => {
-                            let mut files = self.files.iter().filter(|(test_path, _file)| {
-                                test_path.extension() == Some(&self.parser_info.extension)
-                                    && test_path.parent() == Some(&test_dir_path)
-                            });
-
-                            loop {
-                                if self.input.peek().is_some() {
-                                    continue 'top;
-                                }
-
-                                if let Some((path, file)) = files.next() {
-                                    if let Some((lexerdef, grm, _, stable)) = &self.stuff {
+                if let Some((lexerdef, _, _, _)) = &stuff {
+                    if let Some(pb) = &pb {
+                        'change: for change in self.change_set.drain() {
+                            match change {
+                                Change::File(file_path) => {
+                                    let file = self.files.get(&file_path);
+                                    if let Some(file) = file {
                                         let now = std::time::Instant::now();
-                                        let contents = file.contents.to_string();
-                                        let lexer = lexerdef.lexer(&contents);
-                                        let pb = lrpar::RTParserBuilder::new(grm, stable)
-                                            .recoverer(self.parser_info.recovery_kind);
+                                        let input = file.contents.to_string();
+                                        let lexer = lexerdef.lexer(&input);
 
                                         match self.parser_info.yacc_kind {
-                                            YaccKind::Original(
+                                            yacc::YaccKind::Original(
                                                 YaccOriginalActionKind::NoAction,
                                             ) => {
                                                 self.output
                                                     .send(ParserMsg::Parsed(
-                                                        path.to_owned(),
+                                                        file_path.to_owned(),
                                                         None,
                                                         pb.parse_noaction(&lexer),
                                                         now.elapsed(),
                                                     ))
                                                     .unwrap();
                                             }
-                                            YaccKind::Original(
+                                            yacc::YaccKind::Original(
                                                 YaccOriginalActionKind::GenericParseTree,
                                             ) => {
                                                 let (pt, errors) = pb.parse_generictree(&lexer);
                                                 self.output
                                                     .send(ParserMsg::Parsed(
-                                                        path.to_owned(),
+                                                        file_path.to_owned(),
                                                         pt,
                                                         errors,
                                                         now.elapsed(),
@@ -350,11 +320,62 @@ impl ParseThread {
                                             }
                                             _ => {}
                                         }
-                                    } else {
-                                        continue 'top;
                                     }
-                                } else {
-                                    continue 'change;
+                                }
+                                Change::Extension(_extension, test_dir_path, _pass) => {
+                                    let mut files =
+                                        self.files.iter().filter(|(test_path, _file)| {
+                                            test_path.extension()
+                                                == Some(&self.parser_info.extension)
+                                                && test_path.parent() == Some(&test_dir_path)
+                                        });
+
+                                    loop {
+                                        if self.input.peek().is_some() {
+                                            continue 'top;
+                                        }
+
+                                        if let Some((path, file)) = files.next() {
+                                            if let Some((lexerdef, _, _, _)) = &stuff {
+                                                let now = std::time::Instant::now();
+                                                let contents = file.contents.to_string();
+                                                let lexer = lexerdef.lexer(&contents);
+                                                match self.parser_info.yacc_kind {
+                                                    YaccKind::Original(
+                                                        YaccOriginalActionKind::NoAction,
+                                                    ) => {
+                                                        self.output
+                                                            .send(ParserMsg::Parsed(
+                                                                path.to_owned(),
+                                                                None,
+                                                                pb.parse_noaction(&lexer),
+                                                                now.elapsed(),
+                                                            ))
+                                                            .unwrap();
+                                                    }
+                                                    YaccKind::Original(
+                                                        YaccOriginalActionKind::GenericParseTree,
+                                                    ) => {
+                                                        let (pt, errors) =
+                                                            pb.parse_generictree(&lexer);
+                                                        self.output
+                                                            .send(ParserMsg::Parsed(
+                                                                path.to_owned(),
+                                                                pt,
+                                                                errors,
+                                                                now.elapsed(),
+                                                            ))
+                                                            .unwrap();
+                                                    }
+                                                    _ => {}
+                                                }
+                                            } else {
+                                                continue 'top;
+                                            }
+                                        } else {
+                                            continue 'change;
+                                        }
+                                    }
                                 }
                             }
                         }
