@@ -11,9 +11,9 @@ use num_traits::ToPrimitive as _;
 type LexTable = lrlex::LRNonStreamingLexerDef<lrlex::DefaultLexeme<u32>, u32>;
 
 #[derive(Clone, Debug, Hash, PartialOrd, PartialEq, Ord, Eq)]
-enum Change {
-    Extension(std::ffi::OsString, std::path::PathBuf, bool),
-    File(std::path::PathBuf),
+struct TestReparse {
+    path: std::path::PathBuf,
+    pass: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -38,14 +38,18 @@ pub struct ParseThread {
     pub output: tokio::sync::mpsc::UnboundedSender<ParserMsg>,
     pub input: peek_channel::PeekableReceiver<EditorMsg>,
     pub shutdown: tokio::sync::broadcast::Receiver<()>,
-    pub workspace: (std::path::PathBuf, WorkspaceCfg),
+    pub workspace_path: std::path::PathBuf,
+    pub workspace_cfg: WorkspaceCfg,
 }
 
 impl ParseThread {
+    fn subdir_path(&self, path: &std::path::Path) -> std::path::PathBuf {
+        self.workspace_path.join(path)
+    }
     fn updated_lex_or_yacc_file(
         self: &mut ParseThread,
-        change_set: &mut imbl::HashSet<Change>,
-        files: &imbl::HashMap<std::path::PathBuf, File>,
+        change_set: &mut std::collections::HashSet<TestReparse>,
+        files: &std::collections::HashMap<std::path::PathBuf, File>,
         stuff: &mut Option<(
             LexTable,
             yacc::YaccGrammar,
@@ -53,8 +57,6 @@ impl ParseThread {
             lrtable::StateTable<u32>,
         )>,
     ) {
-        let (workspace_path, workspace_cfg) = &self.workspace;
-
         if let (Some(lex_file), Some(yacc_file)) = (
             files.get(self.parser_info.l_path.as_path()),
             files.get(self.parser_info.y_path.as_path()),
@@ -103,29 +105,20 @@ impl ParseThread {
             }
         };
         change_set.clear();
-        for test_dir in &workspace_cfg.workspace.tests {
-            change_set.insert(Change::Extension(
-                self.parser_info.extension.clone(),
-                workspace_path.join(test_dir.dir.clone().into_inner()),
-                test_dir.pass,
-            ));
-        }
-    }
 
-    fn check_extension_changes(
-        &self,
-        path: &std::path::Path,
-        change_set: &imbl::HashSet<Change>,
-    ) -> bool {
-        let extension = path.extension();
-        let parent = path.parent();
-        let has_extension = change_set.iter().find(|change| match change {
-            Change::Extension(change_extension, change_dir_path, _) => {
-                extension == Some(change_extension) && parent == Some(change_dir_path)
+        for test_dir in self.test_dirs() {
+            let files_of_extension = files.iter().filter(|(test_path, _file)| {
+                test_path.extension() == Some(&self.parser_info.extension)
+                    && test_path.parent()
+                        == Some(self.subdir_path(test_dir.dir.get_ref()).as_path())
+            });
+            for (path, _file) in files_of_extension {
+                change_set.insert(TestReparse {
+                    path: path.clone(),
+                    pass: test_dir.pass,
+                });
             }
-            _ => false,
-        });
-        has_extension.is_some()
+        }
     }
 
     fn parse_file(
@@ -138,7 +131,6 @@ impl ParseThread {
         let now = std::time::Instant::now();
         let input = file.contents.to_string();
         let lexer = lexerdef.lexer(&input);
-
         match self.parser_info.yacc_kind {
             yacc::YaccKind::Original(YaccOriginalActionKind::NoAction) => {
                 self.output
@@ -165,19 +157,20 @@ impl ParseThread {
         }
     }
 
+    pub fn test_dirs(&self) -> &[nimbleparse_toml::TestDir] {
+        self.workspace_cfg.workspace.tests.as_slice()
+    }
+
     pub fn init(mut self: ParseThread) -> impl FnOnce() {
         move || {
-            let mut files: imbl::HashMap<std::path::PathBuf, File> = imbl::HashMap::new();
-            let mut change_set: imbl::HashSet<Change> = imbl::HashSet::new();
-            let mut completed_changes: imbl::HashSet<Change> = imbl::HashSet::new();
-            let mut synthetic_changes: imbl::HashSet<Change> = imbl::HashSet::new();
-            let (workspace_path, workspace_cfg) = &self.workspace;
-            let test_dirs = &workspace_cfg.workspace.tests;
-            for nimbleparse_toml::TestDir { dir, .. } in test_dirs {
-                // relative
-                let dir = dir.clone().into_inner();
-                // absolute
-                let dir = workspace_path.join(dir);
+            let mut files: std::collections::HashMap<std::path::PathBuf, File> =
+                std::collections::HashMap::new();
+            let mut change_set: std::collections::HashSet<TestReparse> =
+                std::collections::HashSet::new();
+
+            // Read in all the test dir files...
+            for nimbleparse_toml::TestDir { dir, .. } in self.test_dirs() {
+                let dir = self.subdir_path(dir.get_ref());
                 let dir_read = std::fs::read_dir(dir);
                 if let Ok(dir_read) = dir_read {
                     dir_read.for_each(|file| {
@@ -198,6 +191,7 @@ impl ParseThread {
                 }
             }
 
+            // Read lex/yacc files.
             let l_contents = std::fs::read_to_string(self.parser_info.l_path.as_path());
             let y_contents = std::fs::read_to_string(self.parser_info.y_path.as_path());
             let mut pb: Option<lrpar::RTParserBuilder<lrlex::DefaultLexeme<u32>, u32>> = None;
@@ -223,6 +217,7 @@ impl ParseThread {
                         _version: None,
                     },
                 );
+                // Build the parser for the filesystem files.
                 self.updated_lex_or_yacc_file(&mut change_set, &files, &mut stuff);
                 if let Some((_, grm, _, stable)) = &stuff {
                     pb.replace(
@@ -233,13 +228,17 @@ impl ParseThread {
             }
             let mut block = false;
 
+            // Start listening for events from the editor.
             'top: while let Err(tokio::sync::broadcast::error::TryRecvError::Empty) =
                 self.shutdown.try_recv()
             {
                 use EditorMsg as M;
+                // On the first run through we don't want to block.
+                // and start parsing everything ASAP.
                 let input = self.input.conditional_blocking_recv(block);
                 block = true;
 
+                // Perhaps some event
                 if let Some(input) = input {
                     match input {
                         M::DidOpen(params) => {
@@ -266,14 +265,17 @@ impl ParseThread {
                                                 .recoverer(self.parser_info.recovery_kind),
                                         );
                                     }
-                                    // change_set taken care of by updated_lex...
-                                    completed_changes.clear();
-                                    synthetic_changes.clear();
                                 } else {
-                                    let change = Change::File(path.to_path_buf());
-                                    completed_changes.remove(&change);
-                                    synthetic_changes.remove(&change);
-                                    if !self.check_extension_changes(&path, &change_set) {
+                                    let parent = path.parent();
+                                    let test_dir = self.test_dirs().iter().find(|test_dir| {
+                                        let test_path = self.subdir_path(test_dir.dir.get_ref());
+                                        Some(test_path.as_path()) == parent
+                                    });
+                                    if let Some(test_dir) = test_dir {
+                                        let change = TestReparse {
+                                            path: path.to_path_buf(),
+                                            pass: test_dir.pass,
+                                        };
                                         change_set.insert(change);
                                     }
                                 }
@@ -324,13 +326,18 @@ impl ParseThread {
                                                     .recoverer(self.parser_info.recovery_kind),
                                             );
                                         }
-                                        completed_changes.clear();
-                                        synthetic_changes.clear();
                                     } else {
-                                        let change = Change::File(path.to_path_buf());
-                                        completed_changes.remove(&change);
-                                        synthetic_changes.remove(&change);
-                                        if !self.check_extension_changes(&path, &change_set) {
+                                        let parent = path.parent();
+                                        let test_dir = self.test_dirs().iter().find(|test_dir| {
+                                            let test_path =
+                                                self.subdir_path(test_dir.dir.get_ref());
+                                            Some(test_path.as_path()) == parent
+                                        });
+                                        if let Some(test_dir) = test_dir {
+                                            let change = TestReparse {
+                                                path: path.to_path_buf(),
+                                                pass: test_dir.pass,
+                                            };
                                             change_set.insert(change);
                                         }
                                     }
@@ -346,58 +353,37 @@ impl ParseThread {
                         }
                     }
                 }
+
+                // Parse everything in the change_set.
                 if let Some((lexerdef, _, _, _)) = &stuff {
                     if let Some(pb) = &pb {
-                        let rel_comp = change_set
-                            .clone()
-                            .relative_complement(completed_changes.clone());
-                        'change: for change in &rel_comp {
-                            match change {
-                                Change::File(path) => {
-                                    let file = files.get(path);
-                                    if let Some(file) = file {
-                                        self.parse_file(file, path, lexerdef, pb);
-                                    } else {
-                                        self.output
-                                            .send(ParserMsg::Info(format!(
-                                                "change set contains unknown file {}",
-                                                path.display()
-                                            )))
-                                            .unwrap();
-                                    }
-                                }
-                                Change::Extension(_extension, test_dir_path, _pass) => {
-                                    let mut filter_files =
-                                        files.iter().filter(|(test_path, _file)| {
-                                            test_path.extension()
-                                                == Some(&self.parser_info.extension)
-                                                && test_path.parent() == Some(test_dir_path)
-                                        });
+                        for reparse in change_set.clone() {
+                            if self.input.peek().is_some() {
+                                continue 'top;
+                            }
 
-                                    loop {
-                                        if self.input.peek().is_some() {
-                                            continue 'top;
-                                        }
-
-                                        if let Some((path, file)) = filter_files.next() {
-                                            if !synthetic_changes
-                                                .contains(&Change::File(path.to_path_buf()))
-                                            {
-                                                self.parse_file(file, path, lexerdef, pb);
-                                                synthetic_changes
-                                                    .insert(Change::File(path.to_path_buf()));
-                                            }
-                                        } else {
-                                            completed_changes.insert(change.clone());
-                                            continue 'change;
-                                        }
-                                    }
-                                }
+                            let TestReparse { path, pass: _pass } = &reparse;
+                            let file = files.get(path);
+                            if let Some(file) = file {
+                                self.parse_file(file, path, lexerdef, pb);
+                                change_set.remove(&reparse);
+                            } else {
+                                self.output
+                                    .send(ParserMsg::Info(format!(
+                                        "change set contains unknown file {}",
+                                        path.display()
+                                    )))
+                                    .unwrap();
                             }
                         }
+                        self.output
+                            .send(ParserMsg::Info(format!(
+                                "Finished changes {:?}",
+                                change_set
+                            )))
+                            .unwrap();
+
                         change_set.clear();
-                        completed_changes.clear();
-                        synthetic_changes.clear();
                     }
                 }
             }
