@@ -49,7 +49,7 @@ pub struct WorkspaceCfg {
     //toml_file: rope::Rope,
 }
 
-type Workspaces = imbl::HashMap<std::path::PathBuf, WorkspaceCfg>;
+type Workspaces = std::collections::HashMap<std::path::PathBuf, WorkspaceCfg>;
 type ParserId = usize;
 
 #[derive(Debug, Clone)]
@@ -92,7 +92,7 @@ async fn process_parser_messages(
 #[derive(Debug)]
 struct State {
     client_monitor: bool,
-    extensions: imbl::HashMap<std::ffi::OsString, ParserInfo>,
+    extensions: std::collections::HashMap<std::ffi::OsString, ParserInfo>,
     parser_channels: Vec<tokio::sync::mpsc::UnboundedSender<EditorMsg>>,
     parser_info: Vec<ParserInfo>,
     shutdown: tokio::sync::broadcast::Sender<()>,
@@ -512,10 +512,10 @@ fn run_server_arg() -> Result<(), ServerError> {
         let (service, socket) = tower_lsp::LspService::new(|client| Backend {
             state: tokio::sync::Mutex::new(State {
                 shutdown: tx,
-                toml: imbl::HashMap::new(),
+                toml: std::collections::HashMap::new(),
                 warned_needs_restart: false,
                 client_monitor: false,
-                extensions: imbl::HashMap::new(),
+                extensions: std::collections::HashMap::new(),
                 parser_channels: Vec::new(),
                 parser_info: Vec::new(),
             }),
