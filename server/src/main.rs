@@ -60,6 +60,7 @@ pub struct ParserInfo {
     recovery_kind: lrpar::RecoveryKind,
     yacc_kind: yacc::YaccKind,
     extension: std::ffi::OsString,
+    quiet: bool,
 }
 
 impl ParserInfo {
@@ -298,6 +299,7 @@ impl tower_lsp::LanguageServer for Backend {
                         recovery_kind: parser.recovery_kind,
                         yacc_kind: parser.yacc_kind,
                         extension: extension.to_owned(),
+                        quiet: parser.quiet,
                     };
 
                     extensions.insert(extension.to_os_string(), parser_info.clone());

@@ -3,6 +3,7 @@ use super::peek_channel;
 use super::{EditorMsg, ParserInfo, WorkspaceCfg};
 use cfgrammar::yacc::{self, YaccOriginalActionKind};
 use ropey as rope;
+use std::fmt;
 
 // traits
 use lrlex::LexerDef as _;
@@ -10,6 +11,34 @@ use lrpar::Lexeme as _;
 use num_traits::ToPrimitive as _;
 
 type LexTable = lrlex::LRNonStreamingLexerDef<lrlex::DefaultLexeme<u32>, u32>;
+
+struct CommaSep<T: fmt::Display> {
+    stuff: Vec<T>,
+}
+
+impl<A: fmt::Display> FromIterator<A> for CommaSep<A> {
+    fn from_iter<T>(iter: T) -> Self
+    where
+        T: IntoIterator<Item = A>,
+    {
+        CommaSep {
+            stuff: iter.into_iter().collect::<Vec<A>>(),
+        }
+    }
+}
+
+impl<'a, T: fmt::Display> fmt::Display for CommaSep<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        let mut iter = self.stuff.iter();
+        if let Some(item) = iter.next() {
+            formatter.write_fmt(format_args!("{}", item))?;
+        }
+        for item in iter {
+            formatter.write_fmt(format_args!(", {}", item))?;
+        }
+        Ok(())
+    }
+}
 
 #[derive(Clone, Debug, Hash, PartialOrd, PartialEq, Ord, Eq)]
 struct TestReparse {
@@ -57,6 +86,13 @@ impl ParseThread {
             files.get(self.parser_info.l_path.as_path()),
             files.get(self.parser_info.y_path.as_path()),
         ) {
+            self.output
+                .send(ParserMsg::Info(format!(
+                    "Rebuilding parser: {} {}",
+                    &self.parser_info.l_path.display(),
+                    &self.parser_info.y_path.display()
+                )))
+                .unwrap();
             if let Ok(mut lexerdef) =
                 lrlex::LRNonStreamingLexerDef::<lrlex::DefaultLexeme<u32>, u32>::from_str(
                     &lex_file.contents.to_string(),
@@ -66,10 +102,56 @@ impl ParseThread {
                     self.parser_info.yacc_kind,
                     &yacc_file.contents.to_string(),
                 );
+
                 if let Ok(grm) = grm {
                     if let Ok((sgraph, stable)) =
                         lrtable::from_yacc(&grm, lrtable::Minimiser::Pager)
                     {
+                        let mut lex_diags = Vec::new();
+                        let mut yacc_diags = Vec::new();
+                        if !self.parser_info.quiet {
+                            if let Some(c) = stable.conflicts() {
+                                let pp_rr = if let Some(i) = grm.expectrr() {
+                                    i != c.rr_len()
+                                } else {
+                                    0 != c.rr_len()
+                                };
+
+                                let pp_sr = if let Some(i) = grm.expect() {
+                                    i != c.sr_len()
+                                } else {
+                                    0 != c.sr_len()
+                                };
+
+                                if pp_rr {
+                                    yacc_diags.push(lsp::Diagnostic {
+                                        severity: Some(lsp::DiagnosticSeverity::ERROR),
+                                        message: c.pp_rr(&grm),
+                                        ..Default::default()
+                                    });
+                                }
+
+                                if pp_sr {
+                                    yacc_diags.push(lsp::Diagnostic {
+                                        severity: Some(lsp::DiagnosticSeverity::ERROR),
+                                        message: c.pp_sr(&grm),
+                                        ..Default::default()
+                                    });
+                                }
+
+                                if pp_rr || pp_sr {
+                                    yacc_diags.push(lsp::Diagnostic {
+                                        severity: Some(lsp::DiagnosticSeverity::ERROR),
+                                        message: format!(
+                                            "Stategraph:\n{}\n",
+                                            sgraph.pp_core_states(&grm)
+                                        ),
+                                        ..Default::default()
+                                    });
+                                }
+                            }
+                        }
+
                         let rule_ids = &grm
                             .tokens_map()
                             .iter()
@@ -78,6 +160,45 @@ impl ParseThread {
 
                         let (missing_from_lexer, missing_from_parser) =
                             lexerdef.set_rule_ids(rule_ids);
+                        if !self.parser_info.quiet {
+                            let lex_url =
+                                lsp::Url::from_file_path(&self.parser_info.l_path).unwrap();
+                            let yacc_url =
+                                lsp::Url::from_file_path(&self.parser_info.y_path).unwrap();
+
+                            // TODO We should use related_information to provide links to both lex & yacc files for these,
+                            // TODO figure out how to get line numbers for these tokens and token references
+                            if let Some(tokens) = &missing_from_parser {
+                                let mut sorted = tokens.iter().cloned().collect::<CommaSep<&str>>();
+                                sorted.stuff.sort_unstable();
+                                lex_diags.push(lsp::Diagnostic {
+                                    severity: Some(lsp::DiagnosticSeverity::WARNING),
+                                    message: format!("these tokens are defined in the lexer but not referenced in the\ngrammar: {}", &sorted),
+                                    ..Default::default()
+                                });
+                            }
+
+                            if let Some(tokens) = &missing_from_lexer {
+                                let mut sorted = tokens.iter().cloned().collect::<CommaSep<&str>>();
+                                sorted.stuff.sort_unstable();
+                                yacc_diags.push(lsp::Diagnostic {
+                                    severity: Some(lsp::DiagnosticSeverity::ERROR),
+                                    message: format!("these tokens are referenced in the grammar but not defined in the lexer: {}", sorted),
+                                    ..Default::default()
+                                });
+                            }
+
+                            self.output
+                                .send(ParserMsg::Diagnostics(
+                                    yacc_url,
+                                    yacc_diags,
+                                    yacc_file.version,
+                                ))
+                                .unwrap();
+                            self.output
+                                .send(ParserMsg::Diagnostics(lex_url, lex_diags, lex_file.version))
+                                .unwrap();
+                        }
 
                         if let Some(tokens) = missing_from_parser {
                             let mut sorted = tokens.iter().cloned().collect::<Vec<&str>>();
@@ -88,7 +209,6 @@ impl ParseThread {
                             let mut sorted = tokens.iter().cloned().collect::<Vec<&str>>();
                             sorted.sort_unstable();
                         }
-
                         stuff.replace((lexerdef, grm, sgraph, stable));
                     } else {
                         let _ = stuff.take();
@@ -100,6 +220,7 @@ impl ParseThread {
                 let _ = stuff.take();
             }
         };
+
         change_set.clear();
 
         for test_dir in self.test_dirs() {

@@ -19,6 +19,8 @@ pub struct Parser {
     pub yacc_kind: cfgrammar::yacc::YaccKind,
     #[serde(default = "default_recovery_kind")]
     pub recovery_kind: RecoveryKind,
+    #[serde(default)]
+    pub quiet: bool,
 }
 
 fn default_yacc_kind() -> cfgrammar::yacc::YaccKind {

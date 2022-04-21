@@ -1,12 +1,20 @@
 [[parsers]]
+yacc_kind = {"Original" = "NoAction"}
 l_file = "src/foo.l"
 y_file = "src/foo.y"
 extension = ".foo"
 
 [[parsers]]
+yacc_kind = {"Original" = "NoAction"}
 l_file = "src/bar.l"
 y_file = "src/bar.y"
 extension = ".foo"
+
+[[parsers]]
+yacc_kind = {"Original" = "NoAction"}
+l_file = "src/unused_tokens.l"
+y_file = "src/conflicts.y"
+extension = ".bad"
 
 [[tests]]
 dir = "tests"
