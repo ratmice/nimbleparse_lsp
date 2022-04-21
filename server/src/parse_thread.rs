@@ -153,7 +153,7 @@ impl ParseThread {
                     }
                     lrpar::LexParseError::ParseError(parse_error) => {
                         let span = parse_error.lexeme().span();
-                        (span, "parse error (span {:?})".to_string())
+                        (span, "parse error".to_string())
                     }
                 };
 
