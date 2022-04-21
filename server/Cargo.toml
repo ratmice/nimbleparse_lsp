@@ -14,13 +14,13 @@ nimbleparse_toml = {path = "../toml"}
 toml = {version = "0.5.8", features=["preserve_order"]}
 serde-transcode = "1.1.1"
 serde_json = { version = "1.0.79", features=["preserve_order"]}
-xi-rope = "0.3.0"
 cfgrammar = "0.12.0"
 lrpar = "0.12.0"
 lrlex = "0.12.0"
 lrtable = "0.12.0"
 num-traits = "0.2.14"
 tokio-stream = "0.1.8"
+ropey = "1.4.1"
 
 [dependencies.console-subscriber]
 version = "0.1.4"

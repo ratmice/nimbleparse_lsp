@@ -81,10 +81,17 @@ async fn process_parser_messages(
     while let Err(tokio::sync::broadcast::error::TryRecvError::Empty) = shutdown.try_recv() {
         let val_from_parser = receivers.next().await;
 
-        if let Some(val_from_parser) = val_from_parser {
-            client
-                .log_message(lsp::MessageType::INFO, format!("{:?}", val_from_parser))
-                .await;
+        if let Some((_receiver_id, msg)) = val_from_parser {
+            match msg {
+                ParserMsg::Info(msg) => {
+                    client
+                        .log_message(lsp::MessageType::INFO, format!("{:?}", msg))
+                        .await;
+                }
+                ParserMsg::Diagnostics(url, diags, version) => {
+                    client.publish_diagnostics(url, diags, version).await;
+                }
+            };
         }
     }
 }
@@ -219,7 +226,7 @@ impl tower_lsp::LanguageServer for Backend {
         let state = state.deref_mut();
         let mut globs: Vec<lsp::Registration> = Vec::new();
         if state.client_monitor {
-            for (_workspace_path, WorkspaceCfg { workspace, .. }) in &state.toml {
+            for WorkspaceCfg { workspace, .. } in state.toml.values() {
                 for parser in workspace.parsers.get_ref() {
                     let glob = format!("**/*{}", parser.extension.get_ref());
                     let mut reg = serde_json::Map::new();

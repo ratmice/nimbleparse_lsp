@@ -1,11 +1,12 @@
-use cfgrammar::yacc::{self, YaccOriginalActionKind};
-use xi_rope as rope;
-
+use super::lsp;
 use super::peek_channel;
 use super::{EditorMsg, ParserInfo, WorkspaceCfg};
+use cfgrammar::yacc::{self, YaccOriginalActionKind};
+use ropey as rope;
 
 // traits
 use lrlex::LexerDef as _;
+use lrpar::Lexeme as _;
 use num_traits::ToPrimitive as _;
 
 type LexTable = lrlex::LRNonStreamingLexerDef<lrlex::DefaultLexeme<u32>, u32>;
@@ -19,18 +20,13 @@ struct TestReparse {
 #[derive(Clone, Debug)]
 struct File {
     contents: rope::Rope,
-    _version: Option<i32>,
+    version: Option<i32>,
 }
 
 #[derive(Debug)]
 pub enum ParserMsg {
     Info(String),
-    Parsed(
-        std::path::PathBuf,
-        Option<lrpar::Node<lrlex::DefaultLexeme<u32>, u32>>,
-        Vec<lrpar::LexParseError<lrlex::DefaultLexeme<u32>, u32>>,
-        std::time::Duration,
-    ),
+    Diagnostics(lsp::Url, Vec<lsp::Diagnostic>, Option<i32>),
 }
 
 pub struct ParseThread {
@@ -127,33 +123,85 @@ impl ParseThread {
         path: &std::path::Path,
         lexerdef: &LexTable,
         pb: &lrpar::RTParserBuilder<lrlex::DefaultLexeme<u32>, u32>,
+        should_pass: bool,
     ) {
-        let now = std::time::Instant::now();
+        let url = lsp::Url::from_file_path(path).unwrap();
+        let _now = std::time::Instant::now();
         let input = file.contents.to_string();
         let lexer = lexerdef.lexer(&input);
-        match self.parser_info.yacc_kind {
+        let (_parse_tree, errors) = match self.parser_info.yacc_kind {
             yacc::YaccKind::Original(YaccOriginalActionKind::NoAction) => {
-                self.output
-                    .send(ParserMsg::Parsed(
-                        path.to_owned(),
-                        None,
-                        pb.parse_noaction(&lexer),
-                        now.elapsed(),
-                    ))
-                    .unwrap();
+                (None, pb.parse_noaction(&lexer))
             }
             yacc::YaccKind::Original(YaccOriginalActionKind::GenericParseTree) => {
-                let (pt, errors) = pb.parse_generictree(&lexer);
+                pb.parse_generictree(&lexer)
+            }
+            _ => (None, vec![]),
+        };
+
+        if errors.is_empty() && !should_pass {
+            self.output
+                .send(ParserMsg::Info("expected failure".to_string()))
+                .unwrap();
+            // We expected this to fail, and it did not, should do something
+        } else if !errors.is_empty() {
+            for error in &errors {
+                let (span, message) = match error {
+                    lrpar::LexParseError::LexError(lex_error) => {
+                        let span = lex_error.span();
+                        (span, "lexical error".to_string())
+                    }
+                    lrpar::LexParseError::ParseError(parse_error) => {
+                        let span = parse_error.lexeme().span();
+                        (span, "parse error (span {:?})".to_string())
+                    }
+                };
+
+                let start = span.start();
+                let end = span.end();
+
+                let line_of_start = file.contents.byte_to_line(start);
+                let line_start_cidx = file.contents.line_to_char(line_of_start);
+                let start_cidx = file.contents.byte_to_char(start);
+                let start_offset = start_cidx - line_start_cidx;
+
+                let line_of_end = file.contents.byte_to_line(end);
+                let line_end_cidx = file.contents.line_to_char(line_of_end);
+                let end_cidx = file.contents.byte_to_char(end);
+                let end_offset = end_cidx - line_end_cidx;
+
+                let start_pos = lsp::Position {
+                    line: line_of_start as u32,
+                    character: start_offset as u32,
+                };
+
+                let end_pos = lsp::Position {
+                    line: line_of_end as u32,
+                    character: end_offset as u32,
+                };
+                let range = lsp::Range {
+                    start: start_pos,
+                    end: end_pos,
+                };
+
+                let diag = lsp::Diagnostic {
+                    range,
+                    message,
+                    ..Default::default()
+                };
                 self.output
-                    .send(ParserMsg::Parsed(
-                        path.to_owned(),
-                        pt,
-                        errors,
-                        now.elapsed(),
+                    .send(ParserMsg::Diagnostics(
+                        url.clone(),
+                        vec![diag],
+                        file.version,
                     ))
                     .unwrap();
             }
-            _ => {}
+        } else {
+            // Parse succeded without error, we should clear any old diagnostics
+            self.output
+                .send(ParserMsg::Diagnostics(url, vec![], file.version))
+                .unwrap();
         }
     }
 
@@ -182,7 +230,7 @@ impl ParseThread {
                                     file.path(),
                                     File {
                                         contents,
-                                        _version: None,
+                                        version: None,
                                     },
                                 );
                             }
@@ -203,18 +251,22 @@ impl ParseThread {
             )> = None;
 
             if let (Ok(l_contents), Ok(y_contents)) = (&l_contents, &y_contents) {
+                let mut contents = rope::RopeBuilder::new();
+                contents.append(l_contents);
                 files.insert(
                     self.parser_info.l_path.clone(),
                     File {
-                        contents: rope::Rope::from(l_contents),
-                        _version: None,
+                        contents: contents.finish(),
+                        version: None,
                     },
                 );
+                let mut contents = rope::RopeBuilder::new();
+                contents.append(y_contents);
                 files.insert(
                     self.parser_info.y_path.clone(),
                     File {
-                        contents: rope::Rope::from(y_contents),
-                        _version: None,
+                        contents: contents.finish(),
+                        version: None,
                     },
                 );
                 // Build the parser for the filesystem files.
@@ -247,7 +299,7 @@ impl ParseThread {
                                     path.clone(),
                                     File {
                                         contents: rope::Rope::from(params.text_document.text),
-                                        _version: Some(params.text_document.version),
+                                        version: Some(params.text_document.version),
                                     },
                                 );
                                 if self.parser_info.l_path == path
@@ -292,22 +344,30 @@ impl ParseThread {
                                 Ok(path) => {
                                     let file = files.entry(path.clone()).or_insert(File {
                                         contents: rope::Rope::from(""),
-                                        _version: None,
+                                        version: None,
                                     });
                                     let rope = &mut file.contents;
                                     for change in params.content_changes {
                                         if let Some(range) = change.range {
-                                            let line_start_pos =
-                                                rope.offset_of_line(range.start.line as usize);
-                                            let line_end_pos =
-                                                rope.offset_of_line(range.end.line as usize);
-                                            // FIXME multibyte characters...
+                                            self.output
+                                                .send(ParserMsg::Info(format!(
+                                                    "did change: {:?}",
+                                                    range
+                                                )))
+                                                .unwrap();
+                                            let start_line_charidx =
+                                                rope.line_to_char(range.start.line as usize);
+                                            let end_line_charidx =
+                                                rope.line_to_char(range.end.line as usize);
                                             let start =
-                                                line_start_pos + range.start.character as usize;
-                                            let end = line_end_pos + range.end.character as usize;
-                                            rope.edit(start..end, change.text);
+                                                start_line_charidx + range.start.character as usize;
+                                            let end =
+                                                end_line_charidx + range.end.character as usize;
+                                            rope.remove(start..end);
+                                            rope.insert(start, &change.text);
                                         } else {
-                                            rope.edit(0..rope.len(), change.text);
+                                            rope.remove(0..rope.len_chars());
+                                            rope.insert(0, &change.text);
                                         }
                                     }
 
@@ -362,10 +422,10 @@ impl ParseThread {
                                 continue 'top;
                             }
 
-                            let TestReparse { path, pass: _pass } = &reparse;
+                            let TestReparse { path, pass } = &reparse;
                             let file = files.get(path);
                             if let Some(file) = file {
-                                self.parse_file(file, path, lexerdef, pb);
+                                self.parse_file(file, path, lexerdef, pb, *pass);
                                 change_set.remove(&reparse);
                             } else {
                                 self.output
