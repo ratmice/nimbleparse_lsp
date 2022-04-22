@@ -354,9 +354,6 @@ impl tower_lsp::LanguageServer for Backend {
     }
 
     async fn hover(&self, _: lsp::HoverParams) -> jsonrpc::Result<Option<lsp::Hover>> {
-        self.client
-            .log_message(lsp::MessageType::LOG, "hover")
-            .await;
         Ok(Some(lsp::Hover {
             contents: lsp::HoverContents::Scalar(lsp::MarkedString::String(
                 "You're hovering!".to_string(),
