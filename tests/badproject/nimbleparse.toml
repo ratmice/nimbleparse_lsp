@@ -12,9 +12,21 @@ extension = ".foo"
 
 [[parsers]]
 yacc_kind = {"Original" = "NoAction"}
-l_file = "src/unused_tokens.l"
-y_file = "src/conflicts.y"
-extension = ".bad"
+l_file = "src/unused_token.l"
+y_file = "src/unused_token.y"
+extension = ".unused"
+
+[[parsers]]
+yacc_kind = {"Original" = "NoAction"}
+l_file = "src/whitespace.l"
+y_file = "src/rr.y"
+extension = ".rr_conflict"
+
+[[parsers]]
+yacc_kind = {"Original" = "NoAction"}
+l_file = "src/sr.l"
+y_file = "src/sr.y"
+extension = ".sr_conflict"
 
 [[tests]]
 dir = "tests"
