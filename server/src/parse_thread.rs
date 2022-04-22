@@ -31,10 +31,10 @@ impl<'a, T: fmt::Display> fmt::Display for CommaSep<T> {
     fn fmt(&self, formatter: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         let mut iter = self.stuff.iter();
         if let Some(item) = iter.next() {
-            formatter.write_fmt(format_args!("{}", item))?;
+            formatter.write_fmt(format_args!("'{}'", item))?;
         }
         for item in iter {
-            formatter.write_fmt(format_args!(", {}", item))?;
+            formatter.write_fmt(format_args!(", '{}'", item))?;
         }
         Ok(())
     }
