@@ -250,6 +250,19 @@ impl ParseThread {
         let _now = std::time::Instant::now();
         let input = file.contents.to_string();
         let lexer = lexerdef.lexer(&input);
+
+        // TODO play with running this in its own thread and using pb.parse_actions with a closure containing an atomic bool
+        // when we peek a message which would invalidate the current parsing action, we could set it, which would cause a panic
+        // then catch the panic so we can actually interrupt parsing.
+        //
+        // The main issue is how to imbue this behavior onto the `NoAction`, and `GenericParseTree`
+        // into this, since `generic_ptree` and `noaction` action implementations are not public.
+        //
+        // As a first pass, just reimplement them manually, or don't support interruption for these yacc_kind's
+        // and add an ad-hoc Nimbleparse_lsp::YaccActionKind::Interruptable...
+        //
+        // This would also have large implications to pb ownership & reuse...
+        // The thread would likely need to be started in `update_lex_or_yacc_file` after pb construction I guess.
         let (_parse_tree, errors) = match self.parser_info.yacc_kind {
             yacc::YaccKind::Original(YaccOriginalActionKind::NoAction) => {
                 (None, pb.parse_noaction(&lexer))
