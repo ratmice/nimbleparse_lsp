@@ -23,7 +23,7 @@ Other editors require hard coding of the test input file extension.
 
 | Editor  | supported | caveats |
 | ------- | ----------|------------------------------------------------------------- |
-| neovim  |           | requires manual config, no dynamically registered extensions |
+| neovim  | :heavy_check_mark: | |
 | vscode  | :heavy_check_mark: | |
 
 ## Configuration

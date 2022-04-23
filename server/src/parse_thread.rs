@@ -279,6 +279,7 @@ impl ParseThread {
                 .unwrap();
             // We expected this to fail, and it did not, should do something
         } else if !errors.is_empty() {
+            let mut diags = Vec::new();
             for error in &errors {
                 let (span, message) = match error {
                     lrpar::LexParseError::LexError(lex_error) => {
@@ -323,14 +324,19 @@ impl ParseThread {
                     message,
                     ..Default::default()
                 };
-                self.output
-                    .send(ParserMsg::Diagnostics(
-                        url.clone(),
-                        vec![diag],
-                        file.version,
-                    ))
-                    .unwrap();
+                diags.push(diag);
             }
+            self.output
+                .send(ParserMsg::Info(format!(
+                    "diagnostics {} {} {:?}",
+                    url.clone(),
+                    diags.len(),
+                    file.version
+                )))
+                .unwrap();
+            self.output
+                .send(ParserMsg::Diagnostics(url, diags, file.version))
+                .unwrap();
         } else {
             // Parse succeded without error, we should clear any old diagnostics
             self.output
@@ -485,8 +491,8 @@ impl ParseThread {
                                         if let Some(range) = change.range {
                                             self.output
                                                 .send(ParserMsg::Info(format!(
-                                                    "did change: {:?}",
-                                                    range
+                                                    "did change: {:?} {:?}",
+                                                    path, range
                                                 )))
                                                 .unwrap();
                                             let start_line_charidx =
@@ -551,6 +557,12 @@ impl ParseThread {
                 // Parse everything in the change_set.
                 if let Some((lexerdef, _, _, _)) = &stuff {
                     if let Some(pb) = &pb {
+                        self.output
+                            .send(ParserMsg::Info(format!(
+                                "Evaluating changes {:?}",
+                                change_set
+                            )))
+                            .unwrap();
                         for reparse in change_set.clone() {
                             if self.input.peek().is_some() {
                                 continue 'top;
@@ -570,14 +582,10 @@ impl ParseThread {
                                     .unwrap();
                             }
                         }
+                        assert!(change_set.is_empty());
                         self.output
-                            .send(ParserMsg::Info(format!(
-                                "Finished changes {:?}",
-                                change_set
-                            )))
+                            .send(ParserMsg::Info("Finished changes".to_string()))
                             .unwrap();
-
-                        change_set.clear();
                     }
                 }
             }

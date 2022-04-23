@@ -499,8 +499,13 @@ impl tower_lsp::LanguageServer for Backend {
 //  This is sync because serde here uses the Write trait,
 //  rather than AsyncWrite.
 
-fn handle_workspace_arg(path: &str) -> Result<(), ServerError> {
-    let toml_file = std::fs::read_to_string(path)?;
+fn handle_workspace_arg(path: &std::path::Path) -> Result<(), ServerError> {
+    let cfg_path = if path.is_dir() {
+        path.join("nimbleparse.toml")
+    } else {
+        path.to_path_buf()
+    };
+    let toml_file = std::fs::read_to_string(cfg_path)?;
     let workspace: nimbleparse_toml::Workspace = toml::de::from_slice(toml_file.as_bytes())?;
     serde_json::to_writer(std::io::stdout(), &workspace)?;
     Ok(())
@@ -550,7 +555,8 @@ fn main() -> Result<(), ServerError> {
         if arg == "--workspace" {
             if let Some(file) = args.next() {
                 // Sync
-                handle_workspace_arg(&file)
+                let path = std::path::PathBuf::from(&file);
+                handle_workspace_arg(path.as_path())
             } else {
                 Err(ServerError::RequiresPath)
             }
