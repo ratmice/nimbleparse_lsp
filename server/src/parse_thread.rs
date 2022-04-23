@@ -533,13 +533,16 @@ impl ParseThread {
                                                 self.subdir_path(test_dir.dir.get_ref());
                                             Some(test_path.as_path()) == parent
                                         });
-                                        if let Some(test_dir) = test_dir {
-                                            let change = TestReparse {
-                                                path: path.to_path_buf(),
-                                                pass: test_dir.pass,
-                                            };
-                                            change_set.insert(change);
-                                        }
+                                        let pass = if let Some(test_dir) = test_dir {
+                                            test_dir.pass
+                                        } else {
+                                            true
+                                        };
+                                        let change = TestReparse {
+                                            path: path.to_path_buf(),
+                                            pass,
+                                        };
+                                        change_set.insert(change);
                                     }
                                 }
                                 Err(()) => {
