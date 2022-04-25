@@ -55,6 +55,10 @@ struct File {
 #[derive(Debug)]
 pub enum ParserMsg {
     Info(String),
+    ProgressStart(i32),
+    ProgressStep(i32, String, u32),
+    ProgressDone(i32),
+    ProgressCancel(i32),
     Diagnostics(lsp::Url, Vec<lsp::Diagnostic>, Option<i32>),
 }
 
@@ -351,6 +355,7 @@ impl ParseThread {
 
     pub fn init(mut self: ParseThread) -> impl FnOnce() {
         move || {
+            let mut token: i32 = std::i32::MIN;
             let mut files: std::collections::HashMap<std::path::PathBuf, File> =
                 std::collections::HashMap::new();
             let mut change_set: std::collections::HashSet<TestReparse> =
@@ -560,21 +565,32 @@ impl ParseThread {
                 // Parse everything in the change_set.
                 if let Some((lexerdef, _, _, _)) = &stuff {
                     if let Some(pb) = &pb {
+                        token += 1;
+                        let n = change_set.len();
                         self.output
                             .send(ParserMsg::Info(format!(
                                 "Evaluating changes {:?}",
                                 change_set
                             )))
                             .unwrap();
-                        for reparse in change_set.clone() {
+
+                        self.output.send(ParserMsg::ProgressStart(token)).unwrap();
+
+                        for (i, reparse) in change_set.clone().iter().enumerate() {
                             if self.input.peek().is_some() {
+                                self.output.send(ParserMsg::ProgressCancel(token)).unwrap();
                                 continue 'top;
                             }
 
                             let TestReparse { path, pass } = &reparse;
                             let file = files.get(path);
                             if let Some(file) = file {
+                                let message: String = format!("{}", path.display());
                                 self.parse_file(file, path, lexerdef, pb, *pass);
+                                let pcnt = ((i as f32 / n as f32) * 100.0).ceil();
+                                self.output
+                                    .send(ParserMsg::ProgressStep(token, message, pcnt as u32))
+                                    .unwrap();
                                 change_set.remove(&reparse);
                             } else {
                                 self.output
@@ -586,6 +602,7 @@ impl ParseThread {
                             }
                         }
                         assert!(change_set.is_empty());
+                        self.output.send(ParserMsg::ProgressDone(token)).unwrap();
                         self.output
                             .send(ParserMsg::Info("Finished changes".to_string()))
                             .unwrap();

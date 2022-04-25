@@ -111,6 +111,8 @@ EOF
 nimbleparse_lsp will generate diagnostics even for multiple files, even which are not open.
 Beyond the builtin diagnostic support, there are neovim plugins worth looking into.
 
+### Diagnostics
+
 1. [telescope](https://github.com/nvim-telescope/telescope.nvim) :thumbsup: :two_hearts: :star2: :revolving_hearts:
 
     Doesn't show diagnostics for unopened files, but `builtin.diagnostics`
@@ -118,6 +120,13 @@ Beyond the builtin diagnostic support, there are neovim plugins worth looking in
     or the current buffer with `:Telescope diagnostics bufnr=0`,
 2. [Trouble](https://github.com/folke/trouble.nvim)
     Shows diagnostics in it separate pane.
+
+### Progress indication
+
+3. [fidget](https://github.com/j-hui/fidget.nvim) :thumbsup:
+   Progress above the status line.
+4. [lsp-status](https://github.com/nvim-lua/lsp-status.nvim)
+   Progress and diagnostic counts info on the status line.
 
 ## Testing
 

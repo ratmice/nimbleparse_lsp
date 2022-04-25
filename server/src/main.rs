@@ -92,6 +92,80 @@ async fn process_parser_messages(
                 ParserMsg::Diagnostics(url, diags, version) => {
                     client.publish_diagnostics(url, diags, version).await;
                 }
+                ParserMsg::ProgressStart(token) => {
+                    let token = lsp::NumberOrString::Number(token);
+                    let begin = lsp::WorkDoneProgressBegin {
+                        title: "Reparsing affected files".to_string(),
+                        cancellable: Some(false),
+                        message: None,
+                        percentage: Some(100),
+                    };
+                    client
+                        .send_request::<lsp::request::WorkDoneProgressCreate>(
+                            lsp::WorkDoneProgressCreateParams {
+                                token: token.clone(),
+                            },
+                        )
+                        .await
+                        .unwrap();
+
+                    client
+                        .send_notification::<lsp::notification::Progress>(lsp::ProgressParams {
+                            token,
+                            value: lsp::ProgressParamsValue::WorkDone(
+                                lsp::WorkDoneProgress::Begin(begin),
+                            ),
+                        })
+                        .await;
+                }
+                ParserMsg::ProgressStep(token, message, pcnt) => {
+                    let token = lsp::NumberOrString::Number(token);
+                    let step = lsp::WorkDoneProgressReport {
+                        cancellable: Some(false),
+                        message: Some(message),
+                        percentage: Some(pcnt),
+                    };
+                    client
+                        .send_notification::<lsp::notification::Progress>(lsp::ProgressParams {
+                            token,
+                            value: lsp::ProgressParamsValue::WorkDone(
+                                lsp::WorkDoneProgress::Report(step),
+                            ),
+                        })
+                        .await;
+                }
+                ParserMsg::ProgressDone(token) => {
+                    let token = lsp::NumberOrString::Number(token);
+                    client
+                        .send_notification::<lsp::notification::Progress>(lsp::ProgressParams {
+                            token,
+                            value: lsp::ProgressParamsValue::WorkDone(lsp::WorkDoneProgress::End(
+                                lsp::WorkDoneProgressEnd {
+                                    message: Some("Finished parsing".to_string()),
+                                },
+                            )),
+                        })
+                        .await;
+                }
+                ParserMsg::ProgressCancel(token) => {
+                    let token = lsp::NumberOrString::Number(token);
+
+                    client
+                        .send_notification::<lsp::notification::Progress>(lsp::ProgressParams {
+                            token: token.clone(),
+                            value: lsp::ProgressParamsValue::WorkDone(lsp::WorkDoneProgress::End(
+                                lsp::WorkDoneProgressEnd {
+                                    message: Some("Interrupted will resume".to_string()),
+                                },
+                            )),
+                        })
+                        .await;
+                    client
+                        .send_notification::<lsp::notification::Cancel>(lsp::CancelParams {
+                            id: token.clone(),
+                        })
+                        .await;
+                }
             };
         }
     }
