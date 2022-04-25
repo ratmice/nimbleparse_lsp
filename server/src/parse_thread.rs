@@ -585,13 +585,14 @@ impl ParseThread {
                             let TestReparse { path, pass } = &reparse;
                             let file = files.get(path);
                             if let Some(file) = file {
-                                let message: String = format!("{}", path.display());
+                                let message: String = format!("{i}/{n} {}", path.strip_prefix(&self.workspace_path).unwrap().display());
                                 self.parse_file(file, path, lexerdef, pb, *pass);
                                 let pcnt = ((i as f32 / n as f32) * 100.0).ceil();
                                 self.output
                                     .send(ParserMsg::ProgressStep(token, message, pcnt as u32))
                                     .unwrap();
                                 change_set.remove(&reparse);
+                                //std::thread::sleep(std::time::Duration::from_millis(500));
                             } else {
                                 self.output
                                     .send(ParserMsg::Info(format!(
