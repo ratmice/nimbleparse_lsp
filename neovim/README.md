@@ -30,8 +30,18 @@ Add the following to init.vim or init.lua without the heredoc.
 ```
 lua <<EOF
 
--- After suggested config on_attach...
+-- Add the following within the same block as your on_attach.
 
+-- Extension to FileType map
+-- You may need to modify this, otherwise the following code
+-- assumes the filetype == extension without leading dot.
+-- because there is not currently any way to query the neovim filetypes.
+-- This may go away once there is a fix for
+-- https://github.com/neovim/neovim/issues/18241
+local extension_lang_map = {
+        ["l"] = "lex",
+        ["y"] = "yacc",
+}
 
 -- This function pulls file extensions out of nimbleparse.toml
 -- and registers them in vim and the lsp client config.
@@ -61,9 +71,13 @@ local nimbleparse_lsp_attach = function(client, bufnr)
 	  for _, parser in pairs(workspace["parsers"]) do
 		local ext = parser["extension"]
 		local no_dot_ext = strip_prefix(".", ext)
-		local ft_reg = "au BufRead,BufNewFile *" .. ext .. " set filetype=" .. no_dot_ext
+		local language = extension_lang_map[no_dot_ext]
+                if not language then
+                  language = no_dot_ext
+                end
+		local ft_reg = "au BufRead,BufNewFile *" .. ext .. " set filetype=" .. language 
 		if not contains(filetypes, no_dot_ext) then
-		  filetypes[#filetypes+1] = no_dot_ext
+		  filetypes[#filetypes+1] = language
 		end
 		vim.api.nvim_command(ft_reg)
 	  end
