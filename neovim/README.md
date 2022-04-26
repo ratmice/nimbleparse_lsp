@@ -113,14 +113,31 @@ Beyond the builtin diagnostic support, there are neovim plugins worth looking in
 
 ### Diagnostics
 
-1. [telescope](https://github.com/nvim-telescope/telescope.nvim) :thumbsup: :two_hearts: :star2: :revolving_hearts:
-
-    Doesn't show diagnostics for unopened files, but `builtin.diagnostics`
-    Shows diagnostics for all opened buffers `:Telescope diagnostics`,
-    or the current buffer with `:Telescope diagnostics bufnr=0`,
+1. [telescope](https://github.com/nvim-telescope/telescope.nvim) :thumbsup:
+   The `Telescope diagnostics` can show diagnostics for all files,
+   or `Telescope diagnostics bufnr=0` for the current file.
 2. [Trouble](https://github.com/folke/trouble.nvim)
     Shows diagnostics in it separate pane.
+3. [nvim-Tree](https://github.com/kyazdani42/nvim-tree.lua) :thumbsup:
+   `Plug 'kyazdani42/nvim-tree.lua`
 
+   When configured to do so, nvim-tree will show diagnostic signs and
+   highlight files with the appropriate color,
+   When you leave the tree open, it will update a diagnostics change.
+   ```
+   nnoremap <leader>t <cmd>NvimTreeToggle<cr>
+   lua <<EOF
+   require('nvim-tree').setup{
+     view = {
+       signcolumn = "yes",
+     },
+     diagnostics = {
+       enable = true,
+       show_on_dirs = true
+     }
+   }
+   EOF
+   ```
 ### Progress indication
 
 3. [fidget](https://github.com/j-hui/fidget.nvim) :thumbsup:
@@ -130,7 +147,7 @@ Beyond the builtin diagnostic support, there are neovim plugins worth looking in
 
 ## Testing
 
-There isn't much done in the plugin yet besides logging to the log file, so you'll want to `tail -f that`...
+watch the log file,
 
 * `:set ft?` show filetype.
 * `:LspInfo` show LSP status
