@@ -278,11 +278,16 @@ impl ParseThread {
         };
 
         if errors.is_empty() && !should_pass {
+            let diags = vec![lsp::Diagnostic {
+                severity: Some(lsp::DiagnosticSeverity::ERROR),
+                message: "Source file parsed without error when expected to fail".to_string(),
+                ..Default::default()
+            }];
             self.output
-                .send(ParserMsg::Info("expected failure".to_string()))
+                .send(ParserMsg::Diagnostics(url, diags, file.version))
                 .unwrap();
             // We expected this to fail, and it did not, should do something
-        } else if !errors.is_empty() {
+        } else if !errors.is_empty() && should_pass {
             let mut diags = Vec::new();
             for error in &errors {
                 let (span, message) = match error {
@@ -585,9 +590,18 @@ impl ParseThread {
                             let TestReparse { path, pass } = &reparse;
                             let file = files.get(path);
                             if let Some(file) = file {
-                                let message: String = format!("{i}/{n} {}", path.strip_prefix(&self.workspace_path).unwrap().display());
+                                let message: String = format!(
+                                    "{i}/{n} {}",
+                                    path.strip_prefix(&self.workspace_path).unwrap().display()
+                                );
                                 self.parse_file(file, path, lexerdef, pb, *pass);
                                 let pcnt = ((i as f32 / n as f32) * 100.0).ceil();
+                                self.output
+                                    .send(ParserMsg::Info(format!(
+                                        "parsed {} {} {} {}",
+                                        token, message, pcnt as u32, pass
+                                    )))
+                                    .unwrap();
                                 self.output
                                     .send(ParserMsg::ProgressStep(token, message, pcnt as u32))
                                     .unwrap();
