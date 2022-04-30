@@ -776,6 +776,7 @@ dependencies = [
  "tokio-stream",
  "toml",
  "tower-lsp",
+ "try_from",
 ]
 
 [[package]]

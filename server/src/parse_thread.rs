@@ -9,11 +9,87 @@ use std::fmt;
 use lrlex::LexerDef as _;
 use lrpar::Lexeme as _;
 use num_traits::ToPrimitive as _;
-
+//use std::hash::Hash as _;
+//use num_traits::{PrimInt as _, Unsigned as _};
 type LexTable = lrlex::LRNonStreamingLexerDef<lrlex::DefaultLexeme<u32>, u32>;
 
 struct CommaSep<T: fmt::Display> {
     stuff: Vec<T>,
+}
+
+struct LRNonStreamingRopeLexer<'lexer, 'input: 'lexer, LexemeT, StorageT: fmt::Debug> {
+    lexemes: Vec<Result<LexemeT, lrpar::LexError>>,
+    rope: &'input rope::Rope,
+    phantom: std::marker::PhantomData<(&'lexer (), StorageT)>,
+}
+
+struct LRNonStreamingRopeLexerDef<LexemeT, StorageT: fmt::Debug> {
+   lexerdef: lrlex::LRNonStreamingLexerDef<LexemeT, StorageT>,
+}
+
+impl<LexemeT, StorageT> LRNonStreamingRopeLexerDef<LexemeT, StorageT>
+where
+    LexemeT: lrpar::Lexeme<StorageT>,
+    StorageT: Copy + fmt::Debug + Eq + std::hash::Hash + num_traits::PrimInt + num_traits::Unsigned,
+    StorageT: try_from::TryFrom<usize>,
+{
+    fn lexer<'lexer, 'input: 'lexer>(&'lexer self, rope: &'input rope::Rope) -> LRNonStreamingRopeLexer<'lexer, 'input, LexemeT, StorageT> {
+        let mut lexemes: Vec<Result<LexemeT, lrpar::LexError>> = vec![];
+        let mut i = 0;
+        while i < rope.len_chars() {
+            let old_i = i;
+            let mut longest = 0;
+            let mut longest_ridx = 0;
+            for (ridx, r) in self.lexerdef.iter_rules().enumerate() {
+                unimplemented!()
+                /*
+                if let Some(m) = r.re.find(&rope.slice(old_i..)) {
+                }
+                */
+            }
+        }
+        LRNonStreamingRopeLexer{ lexemes: lexemes, rope, phantom: std::marker::PhantomData}
+    }
+}
+
+impl<'lexer, 'input: 'lexer, LexemeT, StorageT> lrpar::Lexer<LexemeT, StorageT>
+    for LRNonStreamingRopeLexer<'lexer, 'input, LexemeT, StorageT>
+where
+    LexemeT: lrpar::Lexeme<StorageT>,
+    StorageT: Copy + fmt::Debug + Eq + std::hash::Hash + num_traits::PrimInt + num_traits::Unsigned,
+{
+    fn iter<'a>(&'a self) -> Box<dyn Iterator<Item = Result<LexemeT, lrpar::LexError>> + 'a> {
+        unimplemented!()
+    }
+}
+
+impl<'lexer, 'input: 'lexer, LexemeT, StorageT> lrpar::NonStreamingLexer<'lexer, LexemeT, StorageT>
+    for LRNonStreamingRopeLexer<'input, 'lexer, LexemeT, StorageT>
+where
+    LexemeT: lrpar::Lexeme<StorageT>,
+    StorageT: Copy + Eq + fmt::Debug + std::hash::Hash + num_traits::PrimInt + num_traits::Unsigned,
+{
+    fn span_str(&self, span: lrpar::Span) -> &'lexer str {
+        self.rope.byte_slice(span.start()..span.end()).as_str().unwrap()
+    }
+    fn span_lines_str(&self, span: lrpar::Span) -> &'lexer str {
+        let start = self.rope.line_to_char(span.start());
+        let end = self.rope.line_to_char(span.end());
+        self.rope.slice(start..end).as_str().unwrap()
+    }
+    fn line_col(&self, span: lrpar::Span) -> ((usize, usize), (usize, usize)) {
+        ({
+            let start_line = self.rope.byte_to_line(span.start());
+            let start_char = self.rope.byte_to_char(span.start());
+            let line_char = self.rope.line_to_char(start_line);
+            (start_line, start_char - line_char)
+        }, {
+            let end_line = self.rope.byte_to_line(span.end());
+            let end_char = self.rope.byte_to_char(span.end());
+            let line_char = self.rope.line_to_char(end_line);
+            (end_line, end_char - line_char)
+        })
+    }
 }
 
 impl<A: fmt::Display> FromIterator<A> for CommaSep<A> {

@@ -21,6 +21,7 @@ lrtable = "0.12.0"
 num-traits = "0.2.14"
 tokio-stream = "0.1.8"
 ropey = "1.4.1"
+try_from = "0.3.2"
 
 [dependencies.console-subscriber]
 version = "0.1.4"
