@@ -252,8 +252,8 @@ impl ParseThread {
     ) {
         let url = lsp::Url::from_file_path(path).unwrap();
         let _now = std::time::Instant::now();
-        let input = file.contents.to_string();
-        let lexer = lexerdef.lexer(&input);
+        let input = file.contents.clone();
+        let lexer = lexerdef.rope_lexer(&input);
 
         // TODO play with running this in its own thread and using pb.parse_actions with a closure containing an atomic bool
         // when we peek a message which would invalidate the current parsing action, we could set it, which would cause a panic

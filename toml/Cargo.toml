@@ -6,8 +6,8 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-cfgrammar = {version = "0.12.0", features=["serde"]}
-lrpar = "0.12.0"
+cfgrammar = {git = "https://github.com/ratmice/grmtools/", branch="rope_lexer", features=["serde"]}
+lrpar = {git = "https://github.com/ratmice/grmtools/", branch="rope_lexer", version = "0.12.0"}
 serde = {version="1.0.136", features=["derive"]}
 serde_json = {version="1.0.79", features=["preserve_order"]}
 toml = {version="0.5.8", features=["preserve_order"]}

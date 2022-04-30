@@ -170,8 +170,7 @@ checksum = "baf1de4339761588bc0619e3cbc0120ee582ebb74b53b4efbf79117bd2da40fd"
 [[package]]
 name = "cfgrammar"
 version = "0.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bf74ea341ae8905eac9a234b6a5a845e118c25bbbdecf85ec77431a8b3bfa0be"
+source = "git+https://github.com/ratmice/grmtools?branch=rope_lexer#3cd5aef1f668ad6940e1ded58123d2000d137cd1"
 dependencies = [
  "indexmap",
  "lazy_static",
@@ -631,14 +630,14 @@ dependencies = [
 [[package]]
 name = "lrlex"
 version = "0.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "22b832738fbfa58ad036580929e973b3b6bd31c6d6c7f18f6b5ea7b626675c85"
+source = "git+https://github.com/ratmice/grmtools?branch=rope_lexer#3cd5aef1f668ad6940e1ded58123d2000d137cd1"
 dependencies = [
  "getopts",
  "lazy_static",
  "lrpar",
  "num-traits",
  "regex",
+ "ropey",
  "serde",
  "try_from",
  "vergen",
@@ -647,8 +646,7 @@ dependencies = [
 [[package]]
 name = "lrpar"
 version = "0.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f270b952b07995fe874b10a5ed7dd28c80aa2130e37a7de7ed667d034e0a521"
+source = "git+https://github.com/ratmice/grmtools?branch=rope_lexer#3cd5aef1f668ad6940e1ded58123d2000d137cd1"
 dependencies = [
  "bincode",
  "cactus",
@@ -669,8 +667,7 @@ dependencies = [
 [[package]]
 name = "lrtable"
 version = "0.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a854115c6a10772ac154261592b082436abc869c812575cadcf9d7ceda8eff0b"
+source = "git+https://github.com/ratmice/grmtools?branch=rope_lexer#3cd5aef1f668ad6940e1ded58123d2000d137cd1"
 dependencies = [
  "cfgrammar",
  "fnv",

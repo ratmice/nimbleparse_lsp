@@ -14,10 +14,10 @@ nimbleparse_toml = {path = "../toml"}
 toml = {version = "0.5.8", features=["preserve_order"]}
 serde-transcode = "1.1.1"
 serde_json = { version = "1.0.79", features=["preserve_order"]}
-cfgrammar = "0.12.0"
-lrpar = "0.12.0"
-lrlex = "0.12.0"
-lrtable = "0.12.0"
+cfgrammar = {git = "https://github.com/ratmice/grmtools", branch="rope_lexer"}
+lrpar = {git = "https://github.com/ratmice/grmtools/", branch="rope_lexer"}
+lrlex = {git = "https://github.com/ratmice/grmtools/", branch="rope_lexer", features=["rope"]}
+lrtable = {git = "https://github.com/ratmice/grmtools/", branch="rope_lexer"}
 num-traits = "0.2.14"
 tokio-stream = "0.1.8"
 ropey = "1.4.1"
