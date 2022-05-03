@@ -36,7 +36,19 @@ export function activate(context: vscode.ExtensionContext) {
     // const lsp_path_relative = path.resolve(__dirname, "nimbleparse_lsp");
 
     const lsp_path = "nimbleparse_lsp";
-    
+
+    // This doesn't quite work if we have a project `foo/`
+    // and a `foo/bar/nimbleparse.toml`.
+    // As there is no way to ask vscode for all the `workspaceContains:**/nimbleparse.toml`
+    // recursive glob patterns that caused the activation
+    // https://github.com/microsoft/vscode/issues/44711
+    // Woe is me if I have to walk the filesystem again
+    // looking for them, especially since: vscode can cause activation because walking the filesystem took too long.
+    // and timed out, starting another recursive walk in that case might be well intensioned,
+    // but i'm unconvinced it would be a good idea, since it would seem to more often than not take
+    // It would merely take a long time looking for something that isn't there and then exit or timeout again.
+    //
+    // If they ever fix 44711 fix this to use the workspaceContains path that matched.
     var tomls = vscode.workspace.workspaceFolders?.map(
         (folder) =>  <ParserWorkspace>({
            workspace: JSON.parse(execFileSync(lsp_path, ["--workspace", Uri.joinPath(folder.uri, "nimbleparse.toml").fsPath]).toString()),
