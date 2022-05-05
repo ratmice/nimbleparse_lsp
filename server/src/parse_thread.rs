@@ -358,6 +358,22 @@ impl ParseThread {
         self.workspace_cfg.workspace.tests.as_slice()
     }
 
+    // Given a `ParseThread` returns a function which performs a loop
+    // receiving incremental file updates from lsp, generates
+    // a RTParserBuilder, and then parses files.
+    //
+    // This exists in it's own thread because RTParserBuilder is !Sync
+    // and !Send.  It can live on the stack in an async function.
+    // Crucially though it then could not cross an await point.
+    //
+    // TODO: Ownership in this loop is a bit difficult,
+    // It would be nice to factor this out into a few more functions
+    // but for now the ownership situation has foiled my attempts at
+    // cleanly refactoring specifically there is no real way to put all
+    // the local `mut` variables into any self, since they are taken mutably
+    // and immutably at different points within the loop and putting them in
+    // one self binds them all to a single lifetime.
+    // It certainly can be improved though.
     pub fn init(mut self: ParseThread) -> impl FnOnce() {
         move || {
             let mut token: i32 = std::i32::MIN;
