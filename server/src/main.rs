@@ -165,6 +165,18 @@ async fn process_parser_messages(
                         })
                         .await;
                 }
+
+                ParserMsg::StateTable {
+                    y_path,
+                    state_table,
+                } => {
+                    client
+                        .log_message(
+                            lsp::MessageType::INFO,
+                            format!("state table for: {}\n {}", y_path.display(), state_table),
+                        )
+                        .await;
+                }
             };
         }
     }
@@ -209,12 +221,19 @@ impl State {
             ids.dedup();
         }
     }
+
+    fn find_parser_info(&self, parser_path: &std::path::Path) -> Option<&ParserInfo> {
+        self.extensions
+            .values()
+            .find(|parser_info| parser_info.y_path == parser_path)
+    }
 }
 
 #[derive(Debug)]
 pub enum EditorMsg {
     DidChange(lsp::DidChangeTextDocumentParams),
     DidOpen(lsp::DidOpenTextDocumentParams),
+    StateTable,
 }
 
 fn initialize_failed(reason: String) -> jsonrpc::Result<lsp::InitializeResult> {
@@ -579,15 +598,34 @@ impl tower_lsp::LanguageServer for Backend {
         if params.command == "nimbleparse_lsp.stateTable" {
             if params.arguments.len() == 1 {
                 if let serde_json::Value::String(url_str) = &params.arguments[0] {
-                    let parser_path =
+                    let state = self.state.lock().await;
+                    let parser_url =
                         lsp::Url::parse(url_str).map_err(|e| tower_lsp::jsonrpc::Error {
                             code: tower_lsp::jsonrpc::ErrorCode::InvalidParams,
                             message: e.to_string(),
                             data: Some(serde_json::Value::String(url_str.to_string())),
-                        });
-                    // TODO check it is a parser path...
-                    // TODO the stable table
-                    // TODO send the state table
+                        })?;
+                    let parser_path =
+                        parser_url
+                            .to_file_path()
+                            .map_err(|()| tower_lsp::jsonrpc::Error {
+                                code: tower_lsp::jsonrpc::ErrorCode::InvalidParams,
+                                message: format!("Error converting url to path: {}", parser_url),
+                                data: None,
+                            })?;
+                    if let Some(parser_info) = state.find_parser_info(&parser_path) {
+                        let channel = &state.parser_channels[parser_info.id];
+                        channel.send(EditorMsg::StateTable).map_err(|e| {
+                            tower_lsp::jsonrpc::Error {
+                                code: tower_lsp::jsonrpc::ErrorCode::InternalError,
+                                message: format!(
+                                    "Channel error {e} sending to parser: {} ",
+                                    parser_url
+                                ),
+                                data: None,
+                            }
+                        })?;
+                    }
                     self.client
                         .log_message(
                             lsp::MessageType::INFO,

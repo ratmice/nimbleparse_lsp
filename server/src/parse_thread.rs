@@ -60,6 +60,10 @@ pub enum ParserMsg {
     ProgressDone(i32),
     ProgressCancel(i32),
     Diagnostics(lsp::Url, Vec<lsp::Diagnostic>, Option<i32>),
+    StateTable {
+        y_path: std::path::PathBuf,
+        state_table: String,
+    },
 }
 
 pub struct ParseThread {
@@ -142,18 +146,6 @@ impl ParseThread {
                                         ..Default::default()
                                     });
                                 }
-                                /*
-                                if pp_rr || pp_sr {
-                                    yacc_diags.push(lsp::Diagnostic {
-                                        severity: Some(lsp::DiagnosticSeverity::ERROR),
-                                        message: format!(
-                                            "Stategraph:\n{}\n",
-                                            sgraph.pp_core_states(&grm)
-                                        ),
-                                        ..Default::default()
-                                    });
-                                }
-                                */
                             }
                         }
 
@@ -579,6 +571,18 @@ impl ParseThread {
                                         ))
                                         .unwrap();
                                 }
+                            }
+                        }
+
+                        M::StateTable => {
+                            if let Some((_, grm, sgraph, _)) = &stuff {
+                                let state_table = sgraph.pp_core_states(&grm);
+                                self.output
+                                    .send(ParserMsg::StateTable {
+                                        y_path: self.parser_info.y_path.to_owned(),
+                                        state_table,
+                                    })
+                                    .unwrap();
                             }
                         }
                     }
