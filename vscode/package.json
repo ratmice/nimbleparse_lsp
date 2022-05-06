@@ -23,7 +23,13 @@
           "crimson"
         ]
       }
-    ]
+    ],
+    "commands": [
+			{
+				"command": "nimbleparse_lsp.stateTable",
+				"title": "Show parser state table"
+			}
+		]
   },
   "scripts": {
     "vscode:prepublish": "npm run esbuild-base -- --minify",

@@ -142,7 +142,7 @@ impl ParseThread {
                                         ..Default::default()
                                     });
                                 }
-
+                                /*
                                 if pp_rr || pp_sr {
                                     yacc_diags.push(lsp::Diagnostic {
                                         severity: Some(lsp::DiagnosticSeverity::ERROR),
@@ -153,6 +153,7 @@ impl ParseThread {
                                         ..Default::default()
                                     });
                                 }
+                                */
                             }
                         }
 

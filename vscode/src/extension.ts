@@ -9,6 +9,8 @@ import {
 	ServerOptions,
     Trace,
     RevealOutputChannelOn,
+    ExecuteCommandParams,
+    ExecuteCommandRequest,
 } from 'vscode-languageclient/node';
 
 import { config } from 'process';
@@ -98,6 +100,25 @@ export function activate(context: vscode.ExtensionContext) {
     lspClient = new LanguageClient("nimbleparse_lsp", serverOptions, clientOptions);
     lspClient.trace = Trace.Verbose;
     context.subscriptions.push(lspClient.start());
+
+    const state_table_command = 'nimbleparse_lsp.stateTable';
+    context.subscriptions.push(
+        vscode.commands.registerCommand(state_table_command, async () => {
+            let uri = vscode.window.activeTextEditor?.document.uri;
+            const params: ExecuteCommandParams = { command: state_table_command, arguments:[uri?.toString()]};
+            return sendCommand(lspClient, params);
+        })
+    );
+}
+
+function sendCommand(client: LanguageClient, params: ExecuteCommandParams): Promise<any> {
+    return client.sendRequest(ExecuteCommandRequest.type, params);
+}
+
+// Use this for commands that can spawn from activation events
+// TODO waits forever during startup failure probably.
+function sendActivationCommand(client: LanguageClient, params: ExecuteCommandParams): Promise<any> {
+    return client.onReady().then(() => { sendCommand(client, params) });
 }
 
 export async function deactivate(): Promise<void> {   
