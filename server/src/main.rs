@@ -187,7 +187,6 @@ struct State {
     client_monitor: bool,
     extensions: std::collections::HashMap<std::ffi::OsString, ParserInfo>,
     parser_channels: Vec<tokio::sync::mpsc::UnboundedSender<EditorMsg>>,
-    parser_info: Vec<ParserInfo>,
     shutdown: tokio::sync::broadcast::Sender<()>,
     toml: Workspaces,
     warned_needs_restart: bool,
@@ -404,7 +403,6 @@ impl tower_lsp::LanguageServer for Backend {
                     state.parser_channels.push(input_send);
                     output_channels.push(parse_recv);
 
-                    state.parser_info.push(parser_info.clone());
                     std::thread::spawn(ParseThread::init(ParseThread {
                         parser_info,
                         output: parse_send,
@@ -497,13 +495,14 @@ impl tower_lsp::LanguageServer for Backend {
                     if let Some(send) = result {
                         send.send(EditorMsg::DidChange(params.clone())).unwrap();
                     } else {
+                        let parser_info = state
+                            .extensions
+                            .values()
+                            .find(|parser_info| &parser_info.id == id);
                         self.client
                             .log_message(
                                 lsp::MessageType::ERROR,
-                                format!(
-                                    "Internal error: no channel for parser: {:?}",
-                                    state.parser_info[*id]
-                                ),
+                                format!("Internal error: no channel for parser: {:?}", parser_info),
                             )
                             .await;
                     }
@@ -673,7 +672,6 @@ fn run_server_arg() -> Result<(), ServerError> {
                 client_monitor: false,
                 extensions: std::collections::HashMap::new(),
                 parser_channels: Vec::new(),
-                parser_info: Vec::new(),
             }),
             client,
         });
