@@ -12,6 +12,7 @@ tokio = {version = "1.17.0", features=["fs", "macros", "rt-multi-thread", "io-st
 tower-lsp = "0.16.0"
 nimbleparse_toml = {path = "../toml"}
 toml = {version = "0.5.8", features=["preserve_order"]}
+serde = "1.0.137"
 serde-transcode = "1.1.1"
 serde_json = { version = "1.0.79", features=["preserve_order"]}
 cfgrammar = "0.12.0"

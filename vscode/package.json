@@ -26,7 +26,7 @@
     ],
     "commands": [
 			{
-				"command": "nimbleparse_lsp.stateTable",
+				"command": "nimbleparse_lsp.statetable",
 				"title": "Show parser state table"
 			}
 		]

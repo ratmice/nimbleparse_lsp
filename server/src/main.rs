@@ -3,12 +3,12 @@ mod peek_channel;
 
 use cfgrammar::yacc;
 use parse_thread::{ParseThread, ParserMsg};
+use serde;
 use tower_lsp::jsonrpc;
 use tower_lsp::lsp_types as lsp;
 
 // traits
-use std::ops::DerefMut;
-
+use std::ops::DerefMut as _;
 use tokio_stream::StreamExt as _;
 
 #[derive(thiserror::Error, Debug)]
@@ -66,6 +66,12 @@ impl ParserInfo {
     fn id(&self) -> ParserId {
         self.id
     }
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+struct ServerDocumentParams {
+    cmd: String,
+    path: String,
 }
 
 async fn process_parser_messages(
@@ -241,6 +247,23 @@ fn initialize_failed(reason: String) -> jsonrpc::Result<lsp::InitializeResult> {
         message: format!("Error during server initialization: {}", reason),
         data: None,
     })
+}
+
+impl Backend {
+    async fn get_server_document(&self, params: ServerDocumentParams) -> jsonrpc::Result<String> {
+        // TODO this is in flux, we have to figure out how to actually get the state table
+        // at this point, or how to forward the ability to respond to the request off to one
+        // of the parse threads or the response thread.
+        // https://github.com/ebkalderon/tower-lsp/issues/339
+        self.client
+            .log_message(
+                lsp::MessageType::INFO,
+                format!("get_server_document {:?}", params),
+            )
+            .await;
+
+        Ok(format!("{:?}", params))
+    }
 }
 
 #[tower_lsp::async_trait]
@@ -594,7 +617,7 @@ impl tower_lsp::LanguageServer for Backend {
         &self,
         params: lsp::ExecuteCommandParams,
     ) -> tower_lsp::jsonrpc::Result<Option<serde_json::Value>> {
-        if params.command == "nimbleparse_lsp.stateTable" {
+        if params.command == "nimbleparse_lsp.statetable" {
             if params.arguments.len() == 1 {
                 if let serde_json::Value::String(url_str) = &params.arguments[0] {
                     let state = self.state.lock().await;
@@ -664,7 +687,7 @@ fn run_server_arg() -> Result<(), ServerError> {
         log::set_max_level(log::LevelFilter::Info);
         let (stdin, stdout) = (tokio::io::stdin(), tokio::io::stdout());
         let (tx, _) = tokio::sync::broadcast::channel(1);
-        let (service, socket) = tower_lsp::LspService::new(|client| Backend {
+        let (service, socket) = tower_lsp::LspService::build(|client| Backend {
             state: tokio::sync::Mutex::new(State {
                 shutdown: tx,
                 toml: std::collections::HashMap::new(),
@@ -674,7 +697,12 @@ fn run_server_arg() -> Result<(), ServerError> {
                 parser_channels: Vec::new(),
             }),
             client,
-        });
+        })
+        .custom_method(
+            "nimbleparse_lsp/get_server_document",
+            Backend::get_server_document,
+        )
+        .finish();
         tower_lsp::Server::new(stdin, stdout, socket)
             .serve(service)
             .await;

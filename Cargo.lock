@@ -784,6 +784,7 @@ dependencies = [
  "nimbleparse_toml",
  "num-traits",
  "ropey",
+ "serde",
  "serde-transcode",
  "serde_json",
  "thiserror",

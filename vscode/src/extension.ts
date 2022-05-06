@@ -11,6 +11,7 @@ import {
     RevealOutputChannelOn,
     ExecuteCommandParams,
     ExecuteCommandRequest,
+    RequestType,
 } from 'vscode-languageclient/node';
 
 import { config } from 'process';
@@ -29,6 +30,17 @@ interface ParserWorkspace {
     workspace: TomlWorkspace,
     folder: string        
 };
+
+namespace ServerDocumentRequest {
+    export const type = new RequestType<ServerDocumentParams, string, void>('nimbleparse_lsp/get_server_document');
+}
+
+interface ServerDocumentParams {
+   // A command like `statetable`
+   cmd: string,
+   // A Uri from which the command is derived like foo/bar.y
+   path: string,
+}
 
 export function activate(context: vscode.ExtensionContext) {
     // This might be needed eventually if we distribute the nimbleparse_lsp binary
@@ -101,12 +113,53 @@ export function activate(context: vscode.ExtensionContext) {
     lspClient.trace = Trace.Verbose;
     context.subscriptions.push(lspClient.start());
 
-    const state_table_command = 'nimbleparse_lsp.stateTable';
+    const cmd_scheme_provider = new class implements vscode.TextDocumentContentProvider {
+        readonly eventEmitter = new vscode.EventEmitter<vscode.Uri>();
+        provideTextDocumentContent(uri: vscode.Uri, token: vscode.CancellationToken): vscode.ProviderResult<string> {
+            if (uri.scheme == "nimbleparse_lsp") {
+                // Turn nimbleparse_lsp_cmd://command/path into a ServerDocumentRequest
+                let cmd = uri.authority;
+                let path = uri.path;
+                let params: ServerDocumentParams = { cmd: cmd, path: path};
+
+                return lspClient.sendRequest(ServerDocumentRequest.type, params).then((response) => {
+                    return response
+                });
+            }
+        }
+
+        get onDidChange(): vscode.Event<vscode.Uri> {
+            return this.eventEmitter.event;
+        }
+    }
+    context.subscriptions.push(
+        vscode.workspace.registerTextDocumentContentProvider('nimbleparse_lsp', cmd_scheme_provider)
+    );
+
+
+    const state_table_command = 'nimbleparse_lsp.statetable';
     context.subscriptions.push(
         vscode.commands.registerCommand(state_table_command, async () => {
-            let uri = vscode.window.activeTextEditor?.document.uri;
-            const params: ExecuteCommandParams = { command: state_table_command, arguments:[uri?.toString()]};
-            return sendCommand(lspClient, params);
+            let uri: Uri | undefined = vscode.window.activeTextEditor?.document.uri;
+            if (uri) {
+                const params: ExecuteCommandParams = { command: state_table_command, arguments:[uri.toString()]};
+                // The following uses two requests, first to generate the state table,
+                // Then to request the resulting state table
+                // The reason for this is I suppose it makes it easier to update the statetable on
+                // parser did_change events and push that to the editor eventually, or as an option.
+                //
+                // If that is done or optionally done we can drop the first `sendCommand` bit, since it
+                // will be part of the parse loop. and just run the cmd_scheme request
+                sendCommand(lspClient, params).then((response) => {
+                    //let cmd_scheme_uri = vscode.Uri.parse("nimbleparse_lsp://statetable.cmd".concat((uri as Uri).path));
+                    let cmd_scheme_uri = Uri.from({scheme: "nimbleparse_lsp", authority: "statetable.cmd", path: uri?.fsPath})
+                    console.log(cmd_scheme_uri.toString())
+                    cmd_scheme_provider.eventEmitter.fire(cmd_scheme_uri);
+                    vscode.workspace.openTextDocument(cmd_scheme_uri).then((textdoc) => {
+                        vscode.window.showTextDocument(textdoc, vscode.ViewColumn.Two, true);
+                    })
+                });
+            };
         })
     );
 }
