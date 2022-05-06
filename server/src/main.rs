@@ -2,10 +2,9 @@ mod parse_thread;
 mod peek_channel;
 
 use cfgrammar::yacc;
+use parse_thread::{ParseThread, ParserMsg};
 use tower_lsp::jsonrpc;
 use tower_lsp::lsp_types as lsp;
-
-use parse_thread::{ParseThread, ParserMsg};
 
 // traits
 use std::ops::DerefMut;
@@ -289,7 +288,11 @@ impl tower_lsp::LanguageServer for Backend {
                 )),
                 hover_provider: Some(lsp::HoverProviderCapability::Simple(true)),
                 completion_provider: Some(lsp::CompletionOptions::default()),
-
+                // Can't return this *and* register in the editor client because of vscode.
+                // returning this doesn't seem to handle arguments, or work with commands
+                // that can be activationEvents.  So this is intentionally None,
+                // even though we provide commands.
+                execute_command_provider: None,
                 ..Default::default()
             },
             ..Default::default()
@@ -567,6 +570,36 @@ impl tower_lsp::LanguageServer for Backend {
         self.client
             .log_message(lsp::MessageType::LOG, "did_change_watched_files")
             .await;
+    }
+
+    async fn execute_command(
+        &self,
+        params: lsp::ExecuteCommandParams,
+    ) -> tower_lsp::jsonrpc::Result<Option<serde_json::Value>> {
+        if params.command == "nimbleparse_lsp.stateTable" {
+            if params.arguments.len() == 1 {
+                if let serde_json::Value::String(url_str) = &params.arguments[0] {
+                    let parser_path =
+                        lsp::Url::parse(url_str).map_err(|e| tower_lsp::jsonrpc::Error {
+                            code: tower_lsp::jsonrpc::ErrorCode::InvalidParams,
+                            message: e.to_string(),
+                            data: Some(serde_json::Value::String(url_str.to_string())),
+                        });
+                    // TODO check it is a parser path...
+                    // TODO the stable table
+                    // TODO send the state table
+                    self.client
+                        .log_message(
+                            lsp::MessageType::INFO,
+                            format!("TODO state table: {:?}", parser_path),
+                        )
+                        .await;
+                }
+            }
+            Ok(None)
+        } else {
+            Err(jsonrpc::Error::invalid_request())
+        }
     }
 }
 
