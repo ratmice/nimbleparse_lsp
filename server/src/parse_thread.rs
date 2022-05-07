@@ -571,10 +571,31 @@ impl ParseThread {
                             }
                         }
 
-                        M::StateTable(st_channel) => {
+                        M::StateTable(channel) => {
                             if let Some((_, grm, sgraph, _)) = &stuff {
                                 let state_table = sgraph.pp_core_states(&grm);
-                                st_channel.send(Some(state_table)).unwrap();
+                                channel.send(Some(state_table)).unwrap();
+                            } else {
+                                channel.send(None).unwrap();
+                            }
+                        }
+                        M::GenericTree(channel, file_path) => {
+                            if let Some((lexerdef, grm, _, _)) = &stuff {
+                                if let Some(file) = files.get(&file_path) {
+                                    let input = file.contents.to_string();
+                                    let lexer = lexerdef.lexer(&input);
+                                    let generic_tree_text = if let Some(pb) = &pb {
+                                        let (tree, _) = pb.parse_generictree(&lexer);
+                                        tree.map_or(None, |tree| Some(tree.pp(&grm, &input)))
+                                    } else {
+                                        None
+                                    };
+                                    channel.send(generic_tree_text.to_owned()).unwrap();
+                                } else {
+                                    channel.send(None).unwrap();
+                                }
+                            } else {
+                                channel.send(None).unwrap();
                             }
                         }
                     }

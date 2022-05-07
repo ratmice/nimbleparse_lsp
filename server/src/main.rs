@@ -215,10 +215,16 @@ impl State {
         }
     }
 
+    /// Expects to be given a path to a parser, returns the parser info for that parser.
     fn find_parser_info(&self, parser_path: &std::path::Path) -> Option<&ParserInfo> {
         self.extensions
             .values()
             .find(|parser_info| parser_info.y_path == parser_path)
+    }
+
+    fn parser_for(&self, path: &std::path::Path) -> Option<&ParserInfo> {
+        path.extension()
+            .map_or(None, |ext| self.extensions.get(ext))
     }
 }
 
@@ -227,6 +233,10 @@ pub enum EditorMsg {
     DidChange(lsp::DidChangeTextDocumentParams),
     DidOpen(lsp::DidOpenTextDocumentParams),
     StateTable(tokio::sync::oneshot::Sender<Option<String>>),
+    GenericTree(
+        tokio::sync::oneshot::Sender<Option<String>>,
+        std::path::PathBuf,
+    ),
 }
 
 fn initialize_failed(reason: String) -> jsonrpc::Result<lsp::InitializeResult> {
@@ -250,19 +260,30 @@ impl Backend {
                 let (send, recv) = tokio::sync::oneshot::channel();
                 let receiver = &state.parser_channels[parser_info.id];
                 receiver.send(EditorMsg::StateTable(send)).unwrap();
-                let foo = recv.await.unwrap_or(None);
-                return Ok(foo);
+                let statetable_text = recv.await.unwrap_or(None);
+                Ok(statetable_text)
+            } else {
+                Ok(None)
             }
+        } else if params.cmd == "generictree.cmd" {
+            let path = std::path::PathBuf::from(&params.path);
+            let parser_info = state.parser_for(&path);
+            if let Some(parser_info) = parser_info {
+                let (send, recv) = tokio::sync::oneshot::channel();
+                let receiver = &state.parser_channels[parser_info.id];
+                receiver.send(EditorMsg::GenericTree(send, path)).unwrap();
+                let statetable_text = recv.await.unwrap_or(None);
+                Ok(statetable_text)
+            } else {
+                Ok(None)
+            }
+        } else {
+            Err(jsonrpc::Error {
+                code: jsonrpc::ErrorCode::InvalidParams,
+                message: "Unknown command name".to_string(),
+                data: Some(serde_json::Value::String(params.cmd)),
+            })
         }
-
-        self.client
-            .log_message(
-                lsp::MessageType::INFO,
-                format!("get_server_document {:?}", params),
-            )
-            .await;
-
-        Ok(None)
     }
 }
 

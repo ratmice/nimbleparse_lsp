@@ -25,11 +25,15 @@
       }
     ],
     "commands": [
-			{
-				"command": "nimbleparse_lsp.statetable",
-				"title": "Show parser state table"
-			}
-		]
+      {
+        "command": "nimbleparse_lsp.statetable",
+        "title": "Show parser state table"
+      },
+      {
+        "command": "nimbleparse_lsp.generictree",
+        "title": "Show generic parse tree"
+      }
+    ]
   },
   "scripts": {
     "vscode:prepublish": "npm run esbuild-base -- --minify",

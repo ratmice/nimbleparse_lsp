@@ -141,14 +141,19 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.workspace.registerTextDocumentContentProvider('nimbleparse_lsp', cmd_scheme_provider)
     );
 
-    const state_table_command = 'nimbleparse_lsp.statetable';
+    showServerDocumentCommand(context, 'statetable', cmd_scheme_provider);
+    showServerDocumentCommand(context, 'generictree', cmd_scheme_provider);
+
+}
+
+function showServerDocumentCommand(context: vscode.ExtensionContext, command: string, provider: vscode.TextDocumentContentProvider) {
+    const vscode_command = 'nimbleparse_lsp.'.concat(command);
     context.subscriptions.push(
-        vscode.commands.registerCommand(state_table_command, async () => {
+        vscode.commands.registerCommand(vscode_command, async () => {
             let uri: Uri | undefined = vscode.window.activeTextEditor?.document.uri;
             if (uri) {
-                let cmd_scheme_uri = Uri.from({scheme: "nimbleparse_lsp", authority: "statetable.cmd", path: uri?.fsPath})
-                console.log(cmd_scheme_uri.toString())
-                cmd_scheme_provider.eventEmitter.fire(cmd_scheme_uri);
+                let cmd_scheme_uri = Uri.from({scheme: "nimbleparse_lsp", authority: command.concat('.cmd'), path: uri?.fsPath})
+                provider.eventEmitter.fire(cmd_scheme_uri);
                 vscode.workspace.openTextDocument(cmd_scheme_uri).then((textdoc) => {
                     vscode.window.showTextDocument(textdoc, vscode.ViewColumn.Two, true);
                 })
