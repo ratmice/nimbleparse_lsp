@@ -136,29 +136,17 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.workspace.registerTextDocumentContentProvider('nimbleparse_lsp', cmd_scheme_provider)
     );
 
-
     const state_table_command = 'nimbleparse_lsp.statetable';
     context.subscriptions.push(
         vscode.commands.registerCommand(state_table_command, async () => {
             let uri: Uri | undefined = vscode.window.activeTextEditor?.document.uri;
             if (uri) {
-                const params: ExecuteCommandParams = { command: state_table_command, arguments:[uri.toString()]};
-                // The following uses two requests, first to generate the state table,
-                // Then to request the resulting state table
-                // The reason for this is I suppose it makes it easier to update the statetable on
-                // parser did_change events and push that to the editor eventually, or as an option.
-                //
-                // If that is done or optionally done we can drop the first `sendCommand` bit, since it
-                // will be part of the parse loop. and just run the cmd_scheme request
-                sendCommand(lspClient, params).then((response) => {
-                    //let cmd_scheme_uri = vscode.Uri.parse("nimbleparse_lsp://statetable.cmd".concat((uri as Uri).path));
-                    let cmd_scheme_uri = Uri.from({scheme: "nimbleparse_lsp", authority: "statetable.cmd", path: uri?.fsPath})
-                    console.log(cmd_scheme_uri.toString())
-                    cmd_scheme_provider.eventEmitter.fire(cmd_scheme_uri);
-                    vscode.workspace.openTextDocument(cmd_scheme_uri).then((textdoc) => {
-                        vscode.window.showTextDocument(textdoc, vscode.ViewColumn.Two, true);
-                    })
-                });
+                let cmd_scheme_uri = Uri.from({scheme: "nimbleparse_lsp", authority: "statetable.cmd", path: uri?.fsPath})
+                console.log(cmd_scheme_uri.toString())
+                cmd_scheme_provider.eventEmitter.fire(cmd_scheme_uri);
+                vscode.workspace.openTextDocument(cmd_scheme_uri).then((textdoc) => {
+                    vscode.window.showTextDocument(textdoc, vscode.ViewColumn.Two, true);
+                })
             };
         })
     );

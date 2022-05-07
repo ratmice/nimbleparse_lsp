@@ -60,10 +60,6 @@ pub enum ParserMsg {
     ProgressDone(i32),
     ProgressCancel(i32),
     Diagnostics(lsp::Url, Vec<lsp::Diagnostic>, Option<i32>),
-    StateTable {
-        y_path: std::path::PathBuf,
-        state_table: String,
-    },
 }
 
 pub struct ParseThread {
@@ -574,15 +570,10 @@ impl ParseThread {
                             }
                         }
 
-                        M::StateTable => {
+                        M::StateTable(st_channel) => {
                             if let Some((_, grm, sgraph, _)) = &stuff {
                                 let state_table = sgraph.pp_core_states(&grm);
-                                self.output
-                                    .send(ParserMsg::StateTable {
-                                        y_path: self.parser_info.y_path.to_owned(),
-                                        state_table,
-                                    })
-                                    .unwrap();
+                                st_channel.send(Some(state_table)).unwrap();
                             }
                         }
                     }

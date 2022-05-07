@@ -171,18 +171,6 @@ async fn process_parser_messages(
                         })
                         .await;
                 }
-
-                ParserMsg::StateTable {
-                    y_path,
-                    state_table,
-                } => {
-                    client
-                        .log_message(
-                            lsp::MessageType::INFO,
-                            format!("state table for: {}\n {}", y_path.display(), state_table),
-                        )
-                        .await;
-                }
             };
         }
     }
@@ -238,7 +226,7 @@ impl State {
 pub enum EditorMsg {
     DidChange(lsp::DidChangeTextDocumentParams),
     DidOpen(lsp::DidOpenTextDocumentParams),
-    StateTable,
+    StateTable(tokio::sync::oneshot::Sender<Option<String>>),
 }
 
 fn initialize_failed(reason: String) -> jsonrpc::Result<lsp::InitializeResult> {
@@ -250,11 +238,23 @@ fn initialize_failed(reason: String) -> jsonrpc::Result<lsp::InitializeResult> {
 }
 
 impl Backend {
-    async fn get_server_document(&self, params: ServerDocumentParams) -> jsonrpc::Result<String> {
-        // TODO this is in flux, we have to figure out how to actually get the state table
-        // at this point, or how to forward the ability to respond to the request off to one
-        // of the parse threads or the response thread.
-        // https://github.com/ebkalderon/tower-lsp/issues/339
+    async fn get_server_document(
+        &self,
+        params: ServerDocumentParams,
+    ) -> jsonrpc::Result<Option<String>> {
+        let state = self.state.lock().await;
+        if params.cmd == "statetable.cmd" {
+            let path = std::path::PathBuf::from(&params.path);
+            let parser_info = state.find_parser_info(&path);
+            if let Some(parser_info) = parser_info {
+                let (send, recv) = tokio::sync::oneshot::channel();
+                let receiver = &state.parser_channels[parser_info.id];
+                receiver.send(EditorMsg::StateTable(send)).unwrap();
+                let foo = recv.await.unwrap_or(None);
+                return Ok(foo);
+            }
+        }
+
         self.client
             .log_message(
                 lsp::MessageType::INFO,
@@ -262,7 +262,7 @@ impl Backend {
             )
             .await;
 
-        Ok(format!("{:?}", params))
+        Ok(None)
     }
 }
 
@@ -611,55 +611,6 @@ impl tower_lsp::LanguageServer for Backend {
         self.client
             .log_message(lsp::MessageType::LOG, "did_change_watched_files")
             .await;
-    }
-
-    async fn execute_command(
-        &self,
-        params: lsp::ExecuteCommandParams,
-    ) -> tower_lsp::jsonrpc::Result<Option<serde_json::Value>> {
-        if params.command == "nimbleparse_lsp.statetable" {
-            if params.arguments.len() == 1 {
-                if let serde_json::Value::String(url_str) = &params.arguments[0] {
-                    let state = self.state.lock().await;
-                    let parser_url =
-                        lsp::Url::parse(url_str).map_err(|e| tower_lsp::jsonrpc::Error {
-                            code: tower_lsp::jsonrpc::ErrorCode::InvalidParams,
-                            message: e.to_string(),
-                            data: Some(serde_json::Value::String(url_str.to_string())),
-                        })?;
-                    let parser_path =
-                        parser_url
-                            .to_file_path()
-                            .map_err(|()| tower_lsp::jsonrpc::Error {
-                                code: tower_lsp::jsonrpc::ErrorCode::InvalidParams,
-                                message: format!("Error converting url to path: {}", parser_url),
-                                data: None,
-                            })?;
-                    if let Some(parser_info) = state.find_parser_info(&parser_path) {
-                        let channel = &state.parser_channels[parser_info.id];
-                        channel.send(EditorMsg::StateTable).map_err(|e| {
-                            tower_lsp::jsonrpc::Error {
-                                code: tower_lsp::jsonrpc::ErrorCode::InternalError,
-                                message: format!(
-                                    "Channel error {e} sending to parser: {} ",
-                                    parser_url
-                                ),
-                                data: None,
-                            }
-                        })?;
-                    }
-                    self.client
-                        .log_message(
-                            lsp::MessageType::INFO,
-                            format!("TODO state table: {:?}", parser_path),
-                        )
-                        .await;
-                }
-            }
-            Ok(None)
-        } else {
-            Err(jsonrpc::Error::invalid_request())
-        }
     }
 }
 
