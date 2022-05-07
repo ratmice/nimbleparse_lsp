@@ -27,6 +27,8 @@ impl<A: fmt::Display> FromIterator<A> for CommaSep<A> {
     }
 }
 
+static LSP_TOKEN: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(std::i32::MIN);
+
 impl<'a, T: fmt::Display> fmt::Display for CommaSep<T> {
     fn fmt(&self, formatter: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         let mut iter = self.stuff.iter();
@@ -365,7 +367,6 @@ impl ParseThread {
     // It certainly can be improved though.
     pub fn init(mut self: ParseThread) -> impl FnOnce() {
         move || {
-            let mut token: i32 = std::i32::MIN;
             let mut files: std::collections::HashMap<std::path::PathBuf, File> =
                 std::collections::HashMap::new();
             let mut change_set: std::collections::HashSet<TestReparse> =
@@ -582,7 +583,7 @@ impl ParseThread {
                 // Parse everything in the change_set.
                 if let Some((lexerdef, _, _, _)) = &stuff {
                     if let Some(pb) = &pb {
-                        token += 1;
+                        let token = LSP_TOKEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         let n = change_set.len();
                         self.output
                             .send(ParserMsg::Info(format!(
