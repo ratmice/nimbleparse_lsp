@@ -69,6 +69,11 @@ export function activate(context: vscode.ExtensionContext) {
            folder: folder.uri.fsPath
         })
     );
+
+    if (tomls == undefined || tomls.length == 0) {
+	    return;
+    }
+
     var dynSelector = tomls?.flatMap(
         (toml) => toml.workspace.parsers.flatMap(
             (parser: Parser) => ([{
