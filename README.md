@@ -13,6 +13,8 @@ Error recovery is optional (enabled by default), but will be slower than disabli
 
 * Parse test input on lex/yacc file change.
 * Parse test input on test input change.
+* Actions to show the parser state table of a parser.
+* Actions to show the generic ast for an input file.
 
 ## Editor support
 
