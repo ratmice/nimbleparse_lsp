@@ -2,11 +2,10 @@
 
 Primarily intended for the development of grammars.
 It seeks to remove any/all extraneous steps between editing a grammar testing it.
-It does not run generate source code, compile the sources, or run actions embedded in the grammar.
-While actions get ignored you can optionally build a generic syntax tree.
 
-Reparsing is performed on the editors buffer, on change, so you do not need to save the changes to reparse.
+It avoids generating source code, compiling the sources, subsequently it will not run actions embedded in the grammar. It will optionally build a generic syntax tree.
 
+Reparsing is performed on the editors buffer, on change. So you do not need to save the changes to reparse. Parser tables are built in memory, so you can both edit the grammar and its input.
 
 Error recovery is optional (enabled by default), but will be slower than disabling it.
 
