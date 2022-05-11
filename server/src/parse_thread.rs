@@ -54,6 +54,28 @@ struct File {
     version: Option<i32>,
 }
 
+impl File {
+    fn span_to_range(&self, span: cfgrammar::Span) -> lsp::Range {
+        let start_line = self.contents.byte_to_line(span.start());
+        let start_line_char_idx = self.contents.line_to_char(start_line) as u32;
+        let start_pos_char_idx = self.contents.byte_to_char(span.start()) as u32;
+
+        let end_line = self.contents.byte_to_line(span.end());
+        let end_line_char_idx = self.contents.line_to_char(end_line) as u32;
+        let end_pos_char_idx = self.contents.byte_to_char(span.end()) as u32;
+        lsp::Range {
+            start: lsp::Position {
+                line: start_line as u32,
+                character: start_pos_char_idx - start_line_char_idx,
+            },
+            end: lsp::Position {
+                line: end_line as u32,
+                character: end_pos_char_idx - end_line_char_idx,
+            },
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum StateGraphPretty {
     CoreStates,
@@ -107,131 +129,268 @@ impl ParseThread {
                     &self.parser_info.y_path.display()
                 )))
                 .unwrap();
-            if let Ok(mut lexerdef) =
+            let lexbuild_result =
                 lrlex::LRNonStreamingLexerDef::<lrlex::DefaultLexeme<u32>, u32>::from_str(
                     &lex_file.contents.to_string(),
-                )
-            {
-                let grm = yacc::YaccGrammar::new(
-                    self.parser_info.yacc_kind,
-                    &yacc_file.contents.to_string(),
                 );
 
-                if let Ok(grm) = grm {
-                    if let Ok((sgraph, stable)) =
-                        lrtable::from_yacc(&grm, lrtable::Minimiser::Pager)
-                    {
-                        let mut lex_diags = Vec::new();
-                        let mut yacc_diags = Vec::new();
-                        let conflicts = if !self.parser_info.quiet {
-                            if let Some(c) = stable.conflicts() {
-                                let pp_rr = if let Some(i) = grm.expectrr() {
-                                    i != c.rr_len()
-                                } else {
-                                    0 != c.rr_len()
-                                };
+            let lex_url = lsp::Url::from_file_path(&self.parser_info.l_path).unwrap();
+            let yacc_url = lsp::Url::from_file_path(&self.parser_info.y_path).unwrap();
+            let mut lex_diags = Vec::new();
+            match lexbuild_result {
+                Ok(mut lexerdef) => {
+                    let mut yacc_diags = Vec::new();
+                    let yaccbuild_result = yacc::YaccGrammar::new(
+                        self.parser_info.yacc_kind,
+                        &yacc_file.contents.to_string(),
+                    );
+                    match yaccbuild_result {
+                        Ok(grm) => {
+                            let tablebuild_result =
+                                lrtable::from_yacc(&grm, lrtable::Minimiser::Pager);
+                            match tablebuild_result {
+                                Ok((sgraph, stable)) => {
+                                    let conflicts = if !self.parser_info.quiet {
+                                        if let Some(c) = stable.conflicts() {
+                                            let pp_rr = if let Some(i) = grm.expectrr() {
+                                                i != c.rr_len()
+                                            } else {
+                                                0 != c.rr_len()
+                                            };
+                                            let pp_sr = if let Some(i) = grm.expect() {
+                                                i != c.sr_len()
+                                            } else {
+                                                0 != c.sr_len()
+                                            };
+                                            if pp_rr {
+                                                for (r1_prod_idx, r2_prod_idx, _st_idx) in
+                                                    c.rr_conflicts()
+                                                {
+                                                    // So this is giving spans on left hand side of
+                                                    // the rules.  I'm not sure that's really what we
+                                                    // want?
+                                                    let r1_ridx = grm.prod_to_rule(*r1_prod_idx);
+                                                    let r2_ridx = grm.prod_to_rule(*r2_prod_idx);
+                                                    let span1 = grm.rule_name_span(r1_ridx);
+                                                    let span2 = grm.rule_name_span(r2_ridx);
+                                                    let r1_name = grm.rule_name_str(r1_ridx);
+                                                    let r2_name = grm.rule_name_str(r1_ridx);
+                                                    yacc_diags.push(lsp::Diagnostic {
+                                                        range: yacc_file.span_to_range(span1),
+                                                        severity: Some(
+                                                            lsp::DiagnosticSeverity::ERROR,
+                                                        ),
+                                                        message: format!(
+                                                            "Reduce({r1_name})/Reduce({r2_name})"
+                                                        ),
+                                                        related_information: Some(vec![
+                                                            lsp::DiagnosticRelatedInformation {
+                                                                location: lsp::Location {
+                                                                    uri: yacc_url.clone(),
+                                                                    range: yacc_file
+                                                                        .span_to_range(span2),
+                                                                },
+                                                                message: "Second Reduce"
+                                                                    .to_string(),
+                                                            },
+                                                        ]),
+                                                        ..Default::default()
+                                                    });
+                                                }
+                                            }
 
-                                let pp_sr = if let Some(i) = grm.expect() {
-                                    i != c.sr_len()
-                                } else {
-                                    0 != c.sr_len()
-                                };
+                                            if pp_sr {
+                                                for (s_tok_idx, r_prod_idx, _st_idx) in
+                                                    c.sr_conflicts()
+                                                {
+                                                    // So this is giving spans on left hand side of
+                                                    // the rule. and the first instance of the token,
+                                                    // I'm certain that is not what we want.
+                                                    //
+                                                    // It seems like this should point to the span
+                                                    // of a specific production.
+                                                    let r_rule_idx = grm.prod_to_rule(*r_prod_idx);
+                                                    let span2 = grm.token_span(*s_tok_idx);
+                                                    let span1 = grm.rule_name_span(r_rule_idx);
+                                                    let shift_name =
+                                                        grm.token_name(*s_tok_idx).unwrap();
+                                                    let reduce_name = grm.rule_name_str(r_rule_idx);
+                                                    yacc_diags.push(lsp::Diagnostic {
+                                                            range: yacc_file.span_to_range(span1),
+                                                            severity: Some(lsp::DiagnosticSeverity::ERROR),
+                                                            message: format!("Shift({shift_name})/Reduce({reduce_name}) conflict."),
+                                                            related_information: Some(vec![
+                                                                lsp::DiagnosticRelatedInformation {
+                                                                    location: lsp::Location{
+                                                                        uri: yacc_url.clone(),
+                                                                        range: yacc_file.span_to_range(span2.unwrap()),
+                                                                    },
+                                                                    message: "Reduce".to_string(),
+                                                                }
+                                                            ]),
+                                                            ..Default::default()
+                                                        });
+                                                }
+                                            }
+                                            pp_rr | pp_sr
+                                        } else {
+                                            false
+                                        }
+                                    } else {
+                                        stable.conflicts().is_none()
+                                    };
 
-                                if pp_rr {
+                                    let rule_ids = &grm
+                                        .tokens_map()
+                                        .iter()
+                                        .map(|(&n, &i)| (n, usize::from(i).to_u32().unwrap()))
+                                        .collect();
+
+                                    let (missing_from_lexer, missing_from_parser) = {
+                                        let (l, p) = lexerdef.set_rule_ids(rule_ids);
+                                        (
+                                            l.map(|a| {
+                                                a.iter()
+                                                    .map(|&b| b.to_string())
+                                                    .collect::<std::collections::HashSet<_>>()
+                                            }),
+                                            p.map(|a| {
+                                                a.iter()
+                                                    .map(|&b| b.to_string())
+                                                    .collect::<std::collections::HashSet<_>>()
+                                            }),
+                                        )
+                                    };
+
+                                    if !self.parser_info.quiet {
+                                        // TODO We should use related_information to provide links to both lex & yacc files for these,
+                                        // TODO figure out how to get line numbers for these tokens and token references
+                                        if let Some(tokens) = &missing_from_parser {
+                                            let mut sorted = tokens
+                                                .iter()
+                                                .cloned()
+                                                .collect::<CommaSep<String>>();
+                                            sorted.stuff.sort_unstable();
+                                            if let Some(missing_from_parser) = missing_from_parser {
+                                                for token in &missing_from_parser {
+                                                    if let Some(rule) =
+                                                        lexerdef.get_rule_by_name(token)
+                                                    {
+                                                        lex_diags.push(lsp::Diagnostic {
+                                                            range: lex_file.span_to_range(rule.name_span),
+                                                            severity: Some(lsp::DiagnosticSeverity::WARNING),
+                                                            message: format!("token '{}' is defined in the lexer but not referenced in the grammar.", token),
+                                                            ..Default::default()
+                                                        });
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        if let Some(missing_from_lexer) = &missing_from_lexer {
+                                            let mut sorted = missing_from_lexer
+                                                .iter()
+                                                .cloned()
+                                                .collect::<CommaSep<String>>();
+                                            sorted.stuff.sort_unstable();
+                                            for token in missing_from_lexer.iter() {
+                                                let token_idx = grm.token_idx(token);
+                                                if let Some(token_idx) = token_idx {
+                                                    if let Some(span) = grm.token_span(token_idx) {
+                                                        yacc_diags.push(lsp::Diagnostic {
+                                                            range: yacc_file.span_to_range(span),
+                                                            severity: Some(lsp::DiagnosticSeverity::ERROR),
+                                                            message: format!("the token '{}' is referenced in the grammar but not defined in the lexer.", token),
+                                                            ..Default::default()
+                                                        });
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if conflicts {
+                                        let _ = stuff.take();
+                                    } else {
+                                        stuff.replace((lexerdef, grm, sgraph, stable));
+                                    }
+                                }
+                                Err(e) => {
+                                    match &e {
+                                        lrtable::StateTableError { pidx: _pidx, .. } => {
+                                            lex_diags.push(lsp::Diagnostic {
+                                                severity: Some(lsp::DiagnosticSeverity::ERROR),
+                                                message: format!("{}", &e.to_string()),
+                                                ..Default::default()
+                                            });
+                                        }
+                                    }
+                                    let _ = stuff.take();
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            let _ = stuff.take();
+                            // Some of these still lack spans
+                            match &e {
+                                cfgrammar::yacc::YaccGrammarError::YaccParserError(
+                                    _parse_error,
+                                ) => {
                                     yacc_diags.push(lsp::Diagnostic {
                                         severity: Some(lsp::DiagnosticSeverity::ERROR),
-                                        message: c.pp_rr(&grm),
+                                        message: format!("Validation error: {}", e.to_string()),
                                         ..Default::default()
                                     });
                                 }
-
-                                if pp_sr {
+                                cfgrammar::yacc::YaccGrammarError::GrammarValidationError(
+                                    validation_error,
+                                ) => {
                                     yacc_diags.push(lsp::Diagnostic {
                                         severity: Some(lsp::DiagnosticSeverity::ERROR),
-                                        message: c.pp_sr(&grm),
+                                        message: format!("{}", &e.to_string()),
                                         ..Default::default()
                                     });
+
+                                    match &validation_error.sym {
+                                        Some(cfgrammar::yacc::ast::Symbol::Token(_name, span))
+                                        | Some(cfgrammar::yacc::ast::Symbol::Rule(_name, span)) => {
+                                            yacc_diags.push(lsp::Diagnostic {
+                                                range: yacc_file.span_to_range(*span),
+                                                severity: Some(lsp::DiagnosticSeverity::ERROR),
+                                                message: format!(
+                                                    "Validation error: {}",
+                                                    &e.to_string()
+                                                ),
+                                                ..Default::default()
+                                            });
+                                        }
+                                        None => {}
+                                    }
                                 }
-                                pp_rr || pp_sr
-                            } else {
-                                false
                             }
-                        } else {
-                            stable.conflicts().is_none()
-                        };
-
-                        let rule_ids = &grm
-                            .tokens_map()
-                            .iter()
-                            .map(|(&n, &i)| (n, usize::from(i).to_u32().unwrap()))
-                            .collect();
-
-                        let (missing_from_lexer, missing_from_parser) =
-                            lexerdef.set_rule_ids(rule_ids);
-                        if !self.parser_info.quiet {
-                            let lex_url =
-                                lsp::Url::from_file_path(&self.parser_info.l_path).unwrap();
-                            let yacc_url =
-                                lsp::Url::from_file_path(&self.parser_info.y_path).unwrap();
-
-                            // TODO We should use related_information to provide links to both lex & yacc files for these,
-                            // TODO figure out how to get line numbers for these tokens and token references
-                            if let Some(tokens) = &missing_from_parser {
-                                let mut sorted = tokens.iter().cloned().collect::<CommaSep<&str>>();
-                                sorted.stuff.sort_unstable();
-                                lex_diags.push(lsp::Diagnostic {
-                                    severity: Some(lsp::DiagnosticSeverity::WARNING),
-                                    message: format!("these tokens are defined in the lexer but not referenced in the\ngrammar: {}", &sorted),
-                                    ..Default::default()
-                                });
-                            }
-
-                            if let Some(tokens) = &missing_from_lexer {
-                                let mut sorted = tokens.iter().cloned().collect::<CommaSep<&str>>();
-                                sorted.stuff.sort_unstable();
-                                yacc_diags.push(lsp::Diagnostic {
-                                    severity: Some(lsp::DiagnosticSeverity::ERROR),
-                                    message: format!("these tokens are referenced in the grammar but not defined in the lexer: {}", sorted),
-                                    ..Default::default()
-                                });
-                            }
-
-                            self.output
-                                .send(ParserMsg::Diagnostics(
-                                    yacc_url,
-                                    yacc_diags,
-                                    yacc_file.version,
-                                ))
-                                .unwrap();
-                            self.output
-                                .send(ParserMsg::Diagnostics(lex_url, lex_diags, lex_file.version))
-                                .unwrap();
                         }
-
-                        if let Some(tokens) = missing_from_parser {
-                            let mut sorted = tokens.iter().cloned().collect::<Vec<&str>>();
-                            sorted.sort_unstable();
-                        }
-
-                        if let Some(tokens) = missing_from_lexer {
-                            let mut sorted = tokens.iter().cloned().collect::<Vec<&str>>();
-                            sorted.sort_unstable();
-                        }
-
-                        if conflicts {
-                            stuff.take();
-                        } else {
-                            stuff.replace((lexerdef, grm, sgraph, stable));
-                        }
-                    } else {
-                        let _ = stuff.take();
                     }
-                } else {
+                    self.output
+                        .send(ParserMsg::Diagnostics(
+                            yacc_url,
+                            yacc_diags,
+                            yacc_file.version,
+                        ))
+                        .unwrap();
+                }
+                Err(e) => {
+                    // Can't currently do better than this because e hides location.
+                    lex_diags.push(lsp::Diagnostic {
+                        severity: Some(lsp::DiagnosticSeverity::ERROR),
+                        message: e.to_string(),
+                        ..Default::default()
+                    });
+
                     let _ = stuff.take();
                 }
-            } else {
-                let _ = stuff.take();
             }
+            self.output
+                .send(ParserMsg::Diagnostics(lex_url, lex_diags, lex_file.version))
+                .unwrap();
         };
 
         change_set.clear();
@@ -322,35 +481,8 @@ impl ParseThread {
                     }
                 };
 
-                let start = span.start();
-                let end = span.end();
-
-                let line_of_start = file.contents.byte_to_line(start);
-                let line_start_cidx = file.contents.line_to_char(line_of_start);
-                let start_cidx = file.contents.byte_to_char(start);
-                let start_offset = start_cidx - line_start_cidx;
-
-                let line_of_end = file.contents.byte_to_line(end);
-                let line_end_cidx = file.contents.line_to_char(line_of_end);
-                let end_cidx = file.contents.byte_to_char(end);
-                let end_offset = end_cidx - line_end_cidx;
-
-                let start_pos = lsp::Position {
-                    line: line_of_start as u32,
-                    character: start_offset as u32,
-                };
-
-                let end_pos = lsp::Position {
-                    line: line_of_end as u32,
-                    character: end_offset as u32,
-                };
-                let range = lsp::Range {
-                    start: start_pos,
-                    end: end_pos,
-                };
-
                 let diag = lsp::Diagnostic {
-                    range,
+                    range: file.span_to_range(span),
                     message,
                     ..Default::default()
                 };
@@ -638,7 +770,7 @@ impl ParseThread {
                                 let mut node_idxs = std::collections::HashMap::new();
                                 let mut sequences: Vec<railroad::Sequence> = Vec::new();
                                 for (foo, ridx) in grm.iter_rules().enumerate() {
-                                    let name = grm.rule_name(ridx);
+                                    let name = grm.rule_name_str(ridx);
                                     let symbol = cfgrammar::Symbol::Rule(ridx);
                                     node_idxs.insert(symbol, foo);
                                     sequences.push(railroad::Sequence::new(vec![Box::new(
@@ -680,7 +812,7 @@ impl ParseThread {
                                                                     Box::new(railroad::Empty),
                                                                     Box::new(
                                                                         railroad::NonTerminal::new(
-                                                                            grm.rule_name(
+                                                                            grm.rule_name_str(
                                                                                 *prod_ridx,
                                                                             )
                                                                             .to_string(),
@@ -693,7 +825,7 @@ impl ParseThread {
                                                                 railroad::Repeat::new(
                                                                     Box::new(
                                                                         railroad::NonTerminal::new(
-                                                                            grm.rule_name(
+                                                                            grm.rule_name_str(
                                                                                 *prod_ridx,
                                                                             )
                                                                             .to_string(),
@@ -707,7 +839,7 @@ impl ParseThread {
                                                     cfgrammar::Symbol::Rule(prod_ridx) => {
                                                         a_seq.push(Box::new(
                                                             railroad::NonTerminal::new(
-                                                                grm.rule_name(*prod_ridx)
+                                                                grm.rule_name_str(*prod_ridx)
                                                                     .to_string(),
                                                             ),
                                                         ));
