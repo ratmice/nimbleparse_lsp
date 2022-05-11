@@ -161,8 +161,22 @@ impl ParseThread {
                             .map(|(&n, &i)| (n, usize::from(i).to_u32().unwrap()))
                             .collect();
 
-                        let (missing_from_lexer, missing_from_parser) =
-                            lexerdef.set_rule_ids(rule_ids);
+                        let (missing_from_lexer, missing_from_parser) = {
+                            let (l, p) = lexerdef.set_rule_ids(rule_ids);
+                            (
+                                l.map(|a| {
+                                    a.iter()
+                                        .map(|&b| b.to_string())
+                                        .collect::<std::collections::HashSet<_>>()
+                                }),
+                                p.map(|a| {
+                                    a.iter()
+                                        .map(|&b| b.to_string())
+                                        .collect::<std::collections::HashSet<_>>()
+                                }),
+                            )
+                        };
+
                         if !self.parser_info.quiet {
                             let lex_url =
                                 lsp::Url::from_file_path(&self.parser_info.l_path).unwrap();
@@ -172,17 +186,44 @@ impl ParseThread {
                             // TODO We should use related_information to provide links to both lex & yacc files for these,
                             // TODO figure out how to get line numbers for these tokens and token references
                             if let Some(tokens) = &missing_from_parser {
-                                let mut sorted = tokens.iter().cloned().collect::<CommaSep<&str>>();
+                                let mut sorted =
+                                    tokens.iter().cloned().collect::<CommaSep<String>>();
                                 sorted.stuff.sort_unstable();
-                                lex_diags.push(lsp::Diagnostic {
-                                    severity: Some(lsp::DiagnosticSeverity::WARNING),
-                                    message: format!("these tokens are defined in the lexer but not referenced in the\ngrammar: {}", &sorted),
-                                    ..Default::default()
-                                });
+                                if let Some(missing_from_parser) = missing_from_parser {
+                                    for token in &missing_from_parser {
+                                        if let Some(rule) = lexerdef.get_rule_by_name(token) {
+                                            let span = rule.name_span;
+                                            let start_line =
+                                                lex_file.contents.byte_to_line(span.start());
+                                            let start_line_char_idx =
+                                                lex_file.contents.line_to_char(start_line) as u32;
+                                            let start_pos_char_idx =
+                                                lex_file.contents.byte_to_char(span.start()) as u32;
+
+                                            let end_line =
+                                                lex_file.contents.byte_to_line(span.end());
+                                            let end_line_char_idx =
+                                                lex_file.contents.line_to_char(end_line) as u32;
+                                            let end_pos_char_idx =
+                                                lex_file.contents.byte_to_char(span.end()) as u32;
+
+                                            lex_diags.push(lsp::Diagnostic {
+                                                range: lsp::Range {
+                                                    start: lsp::Position { line: start_line as u32, character: start_pos_char_idx - start_line_char_idx},
+                                                    end: lsp::Position { line: end_line as u32, character: end_pos_char_idx - end_line_char_idx}
+                                                },
+                                                severity: Some(lsp::DiagnosticSeverity::WARNING),
+                                                message: format!("token '{}' is defined in the lexer but not referenced in the grammar.", token),
+                                                ..Default::default()
+                                            });
+                                        }
+                                    }
+                                }
                             }
 
                             if let Some(tokens) = &missing_from_lexer {
-                                let mut sorted = tokens.iter().cloned().collect::<CommaSep<&str>>();
+                                let mut sorted =
+                                    tokens.iter().cloned().collect::<CommaSep<String>>();
                                 sorted.stuff.sort_unstable();
                                 yacc_diags.push(lsp::Diagnostic {
                                     severity: Some(lsp::DiagnosticSeverity::ERROR),
@@ -203,15 +244,6 @@ impl ParseThread {
                                 .unwrap();
                         }
 
-                        if let Some(tokens) = missing_from_parser {
-                            let mut sorted = tokens.iter().cloned().collect::<Vec<&str>>();
-                            sorted.sort_unstable();
-                        }
-
-                        if let Some(tokens) = missing_from_lexer {
-                            let mut sorted = tokens.iter().cloned().collect::<Vec<&str>>();
-                            sorted.sort_unstable();
-                        }
                         stuff.replace((lexerdef, grm, sgraph, stable));
                     } else {
                         let _ = stuff.take();

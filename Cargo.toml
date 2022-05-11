@@ -4,3 +4,9 @@ members = [
   "toml",
   "xtask",
 ]
+
+[patch.crates-io]
+lrpar = { path = "../grmtools/lrpar" }
+lrlex = { path = "../grmtools/lrlex" }
+cfgrammar = { path = "../grmtools/cfgrammar" }
+lrtable = { path = "../grmtools/lrtable" }
