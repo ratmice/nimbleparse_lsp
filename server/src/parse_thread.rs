@@ -107,179 +107,251 @@ impl ParseThread {
                     &self.parser_info.y_path.display()
                 )))
                 .unwrap();
-            if let Ok(mut lexerdef) =
+            let lexbuild_result =
                 lrlex::LRNonStreamingLexerDef::<lrlex::DefaultLexeme<u32>, u32>::from_str(
                     &lex_file.contents.to_string(),
-                )
-            {
-                let grm = yacc::YaccGrammar::new(
-                    self.parser_info.yacc_kind,
-                    &yacc_file.contents.to_string(),
                 );
 
-                if let Ok(grm) = grm {
-                    if let Ok((sgraph, stable)) =
-                        lrtable::from_yacc(&grm, lrtable::Minimiser::Pager)
-                    {
-                        let mut lex_diags = Vec::new();
-                        let mut yacc_diags = Vec::new();
-                        if !self.parser_info.quiet {
-                            if let Some(c) = stable.conflicts() {
-                                let pp_rr = if let Some(i) = grm.expectrr() {
-                                    i != c.rr_len()
-                                } else {
-                                    0 != c.rr_len()
-                                };
+            let lex_url = lsp::Url::from_file_path(&self.parser_info.l_path).unwrap();
+            let yacc_url = lsp::Url::from_file_path(&self.parser_info.y_path).unwrap();
+            let mut lex_diags = Vec::new();
+            match lexbuild_result {
+                Ok(mut lexerdef) => {
+                    let mut yacc_diags = Vec::new();
+                    let yaccbuild_result = yacc::YaccGrammar::new(
+                        self.parser_info.yacc_kind,
+                        &yacc_file.contents.to_string(),
+                    );
+                    match yaccbuild_result {
+                        Ok(grm) => {
+                            let tablebuild_result =
+                                lrtable::from_yacc(&grm, lrtable::Minimiser::Pager);
+                            match tablebuild_result {
+                                Ok((sgraph, stable)) => {
+                                    if !self.parser_info.quiet {
+                                        if let Some(c) = stable.conflicts() {
+                                            let pp_rr = if let Some(i) = grm.expectrr() {
+                                                i != c.rr_len()
+                                            } else {
+                                                0 != c.rr_len()
+                                            };
 
-                                let pp_sr = if let Some(i) = grm.expect() {
-                                    i != c.sr_len()
-                                } else {
-                                    0 != c.sr_len()
-                                };
+                                            let pp_sr = if let Some(i) = grm.expect() {
+                                                i != c.sr_len()
+                                            } else {
+                                                0 != c.sr_len()
+                                            };
 
-                                if pp_rr {
-                                    yacc_diags.push(lsp::Diagnostic {
-                                        severity: Some(lsp::DiagnosticSeverity::ERROR),
-                                        message: c.pp_rr(&grm),
-                                        ..Default::default()
-                                    });
+                                            if pp_rr {
+                                                yacc_diags.push(lsp::Diagnostic {
+                                                    severity: Some(lsp::DiagnosticSeverity::ERROR),
+                                                    message: c.pp_rr(&grm),
+                                                    ..Default::default()
+                                                });
+                                            }
+
+                                            if pp_sr {
+                                                yacc_diags.push(lsp::Diagnostic {
+                                                    severity: Some(lsp::DiagnosticSeverity::ERROR),
+                                                    message: c.pp_sr(&grm),
+                                                    ..Default::default()
+                                                });
+                                            }
+                                        }
+                                    }
+
+                                    let rule_ids = &grm
+                                        .tokens_map()
+                                        .iter()
+                                        .map(|(&n, &i)| (n, usize::from(i).to_u32().unwrap()))
+                                        .collect();
+
+                                    let (missing_from_lexer, missing_from_parser) = {
+                                        let (l, p) = lexerdef.set_rule_ids(rule_ids);
+                                        (
+                                            l.map(|a| {
+                                                a.iter()
+                                                    .map(|&b| b.to_string())
+                                                    .collect::<std::collections::HashSet<_>>()
+                                            }),
+                                            p.map(|a| {
+                                                a.iter()
+                                                    .map(|&b| b.to_string())
+                                                    .collect::<std::collections::HashSet<_>>()
+                                            }),
+                                        )
+                                    };
+
+                                    if !self.parser_info.quiet {
+                                        // TODO We should use related_information to provide links to both lex & yacc files for these,
+                                        // TODO figure out how to get line numbers for these tokens and token references
+                                        if let Some(tokens) = &missing_from_parser {
+                                            let mut sorted = tokens
+                                                .iter()
+                                                .cloned()
+                                                .collect::<CommaSep<String>>();
+                                            sorted.stuff.sort_unstable();
+                                            if let Some(missing_from_parser) = missing_from_parser {
+                                                for token in &missing_from_parser {
+                                                    if let Some(rule) =
+                                                        lexerdef.get_rule_by_name(token)
+                                                    {
+                                                        let span = rule.name_span;
+                                                        let start_line = lex_file
+                                                            .contents
+                                                            .byte_to_line(span.start());
+                                                        let start_line_char_idx = lex_file
+                                                            .contents
+                                                            .line_to_char(start_line)
+                                                            as u32;
+                                                        let start_pos_char_idx = lex_file
+                                                            .contents
+                                                            .byte_to_char(span.start())
+                                                            as u32;
+
+                                                        let end_line = lex_file
+                                                            .contents
+                                                            .byte_to_line(span.end());
+                                                        let end_line_char_idx = lex_file
+                                                            .contents
+                                                            .line_to_char(end_line)
+                                                            as u32;
+                                                        let end_pos_char_idx = lex_file
+                                                            .contents
+                                                            .byte_to_char(span.end())
+                                                            as u32;
+
+                                                        lex_diags.push(lsp::Diagnostic {
+                                                            range: lsp::Range {
+                                                                start: lsp::Position { line: start_line as u32, character: start_pos_char_idx - start_line_char_idx},
+                                                                end: lsp::Position { line: end_line as u32, character: end_pos_char_idx - end_line_char_idx}
+                                                            },
+                                                            severity: Some(lsp::DiagnosticSeverity::WARNING),
+                                                            message: format!("token '{}' is defined in the lexer but not referenced in the grammar.", token),
+                                                            ..Default::default()
+                                                        });
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        if let Some(missing_from_lexer) = &missing_from_lexer {
+                                            let mut sorted = missing_from_lexer
+                                                .iter()
+                                                .cloned()
+                                                .collect::<CommaSep<String>>();
+                                            sorted.stuff.sort_unstable();
+                                            for token in missing_from_lexer.iter() {
+                                                let token_idx = grm.token_idx(token);
+                                                if let Some(token_idx) = token_idx {
+                                                    if let Some(span) = grm.token_span(token_idx) {
+                                                        let start_line =
+                                                            yacc_file.contents.byte_to_line(span.0);
+                                                        let start_line_char_idx = yacc_file
+                                                            .contents
+                                                            .line_to_char(start_line)
+                                                            as u32;
+                                                        let start_pos_char_idx =
+                                                            yacc_file.contents.byte_to_char(span.0)
+                                                                as u32;
+
+                                                        let end_line =
+                                                            yacc_file.contents.byte_to_line(span.1);
+                                                        let end_line_char_idx = yacc_file
+                                                            .contents
+                                                            .line_to_char(end_line)
+                                                            as u32;
+                                                        let end_pos_char_idx =
+                                                            yacc_file.contents.byte_to_char(span.1)
+                                                                as u32;
+
+                                                        yacc_diags.push(lsp::Diagnostic {
+                                                            range: lsp::Range {
+                                                                start: lsp::Position { line: start_line as u32, character: start_pos_char_idx - start_line_char_idx},
+                                                                end: lsp::Position { line: end_line as u32, character: end_pos_char_idx - end_line_char_idx}
+                                                            },
+                                                            severity: Some(lsp::DiagnosticSeverity::ERROR),
+                                                            message: format!("the token '{}' is referenced in the grammar but not defined in the lexer.", token),
+                                                            ..Default::default()
+                                                        });
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    stuff.replace((lexerdef, grm, sgraph, stable));
                                 }
-
-                                if pp_sr {
-                                    yacc_diags.push(lsp::Diagnostic {
-                                        severity: Some(lsp::DiagnosticSeverity::ERROR),
-                                        message: c.pp_sr(&grm),
-                                        ..Default::default()
-                                    });
-                                }
-                            }
-                        }
-
-                        let rule_ids = &grm
-                            .tokens_map()
-                            .iter()
-                            .map(|(&n, &i)| (n, usize::from(i).to_u32().unwrap()))
-                            .collect();
-
-                        let (missing_from_lexer, missing_from_parser) = {
-                            let (l, p) = lexerdef.set_rule_ids(rule_ids);
-                            (
-                                l.map(|a| {
-                                    a.iter()
-                                        .map(|&b| b.to_string())
-                                        .collect::<std::collections::HashSet<_>>()
-                                }),
-                                p.map(|a| {
-                                    a.iter()
-                                        .map(|&b| b.to_string())
-                                        .collect::<std::collections::HashSet<_>>()
-                                }),
-                            )
-                        };
-
-                        if !self.parser_info.quiet {
-                            let lex_url =
-                                lsp::Url::from_file_path(&self.parser_info.l_path).unwrap();
-                            let yacc_url =
-                                lsp::Url::from_file_path(&self.parser_info.y_path).unwrap();
-
-                            // TODO We should use related_information to provide links to both lex & yacc files for these,
-                            // TODO figure out how to get line numbers for these tokens and token references
-                            if let Some(tokens) = &missing_from_parser {
-                                let mut sorted =
-                                    tokens.iter().cloned().collect::<CommaSep<String>>();
-                                sorted.stuff.sort_unstable();
-                                if let Some(missing_from_parser) = missing_from_parser {
-                                    for token in &missing_from_parser {
-                                        if let Some(rule) = lexerdef.get_rule_by_name(token) {
-                                            let span = rule.name_span;
-                                            let start_line =
-                                                lex_file.contents.byte_to_line(span.start());
-                                            let start_line_char_idx =
-                                                lex_file.contents.line_to_char(start_line) as u32;
-                                            let start_pos_char_idx =
-                                                lex_file.contents.byte_to_char(span.start()) as u32;
-
-                                            let end_line =
-                                                lex_file.contents.byte_to_line(span.end());
-                                            let end_line_char_idx =
-                                                lex_file.contents.line_to_char(end_line) as u32;
-                                            let end_pos_char_idx =
-                                                lex_file.contents.byte_to_char(span.end()) as u32;
-
+                                Err(e) => {
+                                    match &e {
+                                        lrtable::StateTableError { pidx: _pidx, .. } => {
                                             lex_diags.push(lsp::Diagnostic {
-                                                range: lsp::Range {
-                                                    start: lsp::Position { line: start_line as u32, character: start_pos_char_idx - start_line_char_idx},
-                                                    end: lsp::Position { line: end_line as u32, character: end_pos_char_idx - end_line_char_idx}
-                                                },
-                                                severity: Some(lsp::DiagnosticSeverity::WARNING),
-                                                message: format!("token '{}' is defined in the lexer but not referenced in the grammar.", token),
-                                                ..Default::default()
-                                            });
-                                        }
-                                    }
-                                }
-                            }
-
-                            if let Some(missing_from_lexer) = &missing_from_lexer {
-                                let mut sorted = missing_from_lexer
-                                    .iter()
-                                    .cloned()
-                                    .collect::<CommaSep<String>>();
-                                sorted.stuff.sort_unstable();
-                                for token in missing_from_lexer.iter() {
-                                    let token_idx = grm.token_idx(token);
-                                    if let Some(token_idx) = token_idx {
-                                        if let Some(span) = grm.token_span(token_idx) {
-                                            let start_line =
-                                                yacc_file.contents.byte_to_line(span.0);
-                                            let start_line_char_idx =
-                                                yacc_file.contents.line_to_char(start_line) as u32;
-                                            let start_pos_char_idx =
-                                                yacc_file.contents.byte_to_char(span.0) as u32;
-
-                                            let end_line = yacc_file.contents.byte_to_line(span.1);
-                                            let end_line_char_idx =
-                                                yacc_file.contents.line_to_char(end_line) as u32;
-                                            let end_pos_char_idx =
-                                                yacc_file.contents.byte_to_char(span.1) as u32;
-
-                                            yacc_diags.push(lsp::Diagnostic {
-                                                range: lsp::Range {
-                                                    start: lsp::Position { line: start_line as u32, character: start_pos_char_idx - start_line_char_idx},
-                                                    end: lsp::Position { line: end_line as u32, character: end_pos_char_idx - end_line_char_idx}
-                                                },
                                                 severity: Some(lsp::DiagnosticSeverity::ERROR),
-                                                message: format!("the token '{}' is referenced in the grammar but not defined in the lexer.", token),
+                                                message: format!("{}", &e.to_string()),
                                                 ..Default::default()
                                             });
                                         }
                                     }
+                                    let _ = stuff.take();
                                 }
                             }
-
-                            self.output
-                                .send(ParserMsg::Diagnostics(
-                                    yacc_url,
-                                    yacc_diags,
-                                    yacc_file.version,
-                                ))
-                                .unwrap();
-                            self.output
-                                .send(ParserMsg::Diagnostics(lex_url, lex_diags, lex_file.version))
-                                .unwrap();
                         }
+                        Err(e) => {
+                            let _ = stuff.take();
+                            // We can do better than this.
+                            match &e {
+                                cfgrammar::yacc::YaccGrammarError::YaccParserError(
+                                    _parse_error,
+                                ) => {
+                                    yacc_diags.push(lsp::Diagnostic {
+                                        severity: Some(lsp::DiagnosticSeverity::ERROR),
+                                        message: e.to_string(),
+                                        ..Default::default()
+                                    });
+                                }
+                                cfgrammar::yacc::YaccGrammarError::GrammarValidationError(
+                                    validation_error,
+                                ) => {
+                                    yacc_diags.push(lsp::Diagnostic {
+                                        severity: Some(lsp::DiagnosticSeverity::ERROR),
+                                        message: format!("{}", &e.to_string()),
+                                        ..Default::default()
+                                    });
 
-                        stuff.replace((lexerdef, grm, sgraph, stable));
-                    } else {
-                        let _ = stuff.take();
+                                    match &validation_error.sym {
+                                        Some(cfgrammar::yacc::ast::Symbol::Token(_tok_name)) => {
+                                            // Here we have a string for tokens but still can't get the span because
+                                            // we lack a YaccGrammar, I suppose the error should return it.
+                                        }
+                                        Some(cfgrammar::yacc::ast::Symbol::Rule(_rule_name)) => {}
+                                        None => {}
+                                    }
+                                }
+                            }
+                        }
                     }
-                } else {
+                    self.output
+                        .send(ParserMsg::Diagnostics(
+                            yacc_url,
+                            yacc_diags,
+                            yacc_file.version,
+                        ))
+                        .unwrap();
+                }
+                Err(e) => {
+                    // Can't currently do better than this because e hides location.
+                    lex_diags.push(lsp::Diagnostic {
+                        severity: Some(lsp::DiagnosticSeverity::ERROR),
+                        message: e.to_string(),
+                        ..Default::default()
+                    });
+
                     let _ = stuff.take();
                 }
-            } else {
-                let _ = stuff.take();
             }
+            self.output
+                .send(ParserMsg::Diagnostics(lex_url, lex_diags, lex_file.version))
+                .unwrap();
         };
 
         change_set.clear();
