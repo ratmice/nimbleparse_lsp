@@ -10,6 +10,7 @@ xflags::xflags! {
             optional --client
             optional --server
             optional --console
+            optional --debug
         }
     }
 }
@@ -37,6 +38,7 @@ pub struct Install {
     pub client: bool,
     pub server: bool,
     pub console: bool,
+    pub debug: bool,
 }
 
 impl Xtask {

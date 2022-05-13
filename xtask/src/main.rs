@@ -16,9 +16,12 @@ fn project_root() -> PathBuf {
 impl flags::Install {
     pub(crate) fn run(self, sh: &Shell) -> anyhow::Result<()> {
         let default = !(self.server || self.client);
+        let debug_args = if self.debug { Some("--debug") } else { None };
 
         if self.server || default {
+            let server_args = vec!["--path", "server"];
             if self.console {
+                let console_args = vec!["--features", "console"];
                 let rustc_flags = std::env::var("RUSTCFLAGS");
                 let _pushenv_guard = if let Ok(mut rustc_flags) = rustc_flags {
                     rustc_flags.push_str("--cfg tokio_unstable");
@@ -26,9 +29,9 @@ impl flags::Install {
                 } else {
                     sh.push_env("RUSTFLAGS", "--cfg tokio_unstable")
                 };
-                cmd!(sh, "cargo install --path server --features=console").run()?;
+                cmd!(sh,"cargo install {debug_args...} {server_args...} {console_args...}").run()?;
             } else {
-                cmd!(sh, "cargo install --path server").run()?;
+                cmd!(sh, "cargo install {debug_args...} {server_args...}").run()?;
             }
         }
 
