@@ -246,23 +246,23 @@ impl ParseThread {
                                                 if let Some(token_idx) = token_idx {
                                                     if let Some(span) = grm.token_span(token_idx) {
                                                         let start_line =
-                                                            yacc_file.contents.byte_to_line(span.0);
+                                                            yacc_file.contents.byte_to_line(span.start());
                                                         let start_line_char_idx = yacc_file
                                                             .contents
                                                             .line_to_char(start_line)
                                                             as u32;
                                                         let start_pos_char_idx =
-                                                            yacc_file.contents.byte_to_char(span.0)
+                                                            yacc_file.contents.byte_to_char(span.start())
                                                                 as u32;
 
                                                         let end_line =
-                                                            yacc_file.contents.byte_to_line(span.1);
+                                                            yacc_file.contents.byte_to_line(span.end());
                                                         let end_line_char_idx = yacc_file
                                                             .contents
                                                             .line_to_char(end_line)
                                                             as u32;
                                                         let end_pos_char_idx =
-                                                            yacc_file.contents.byte_to_char(span.1)
+                                                            yacc_file.contents.byte_to_char(span.end())
                                                                 as u32;
 
                                                         yacc_diags.push(lsp::Diagnostic {
