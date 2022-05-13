@@ -57,14 +57,18 @@ npm install --global vsce
 ```
 
 ## Neovim Install
+Either: `cargo run --bin xtask -- install --server` or just run `cargo install --path server`.
 
-```
-cargo run --bin xtask -- install --server
-````
-Then follow the configuration in [neovim/](neovim/README.md) 
+Then and look at the configuration in [neovim/](neovim/README.md)
 
-## Developer options
-* `--console` to the install command, to enable tokio-console support. 
+## Xtask commands
+* Install e.g. `cargo run --bin xtask -- install`
+* Clean e.g. `cargo run --bin xtask -- clean`
+
+### Xtask options for development.
+
+Install:
+* `--console` to the install command, to enable tokio-console support.
 * `--debug` to install with debug symbols.
 
 ## Projects

@@ -12,6 +12,9 @@ xflags::xflags! {
             optional --console
             optional --debug
         }
+
+        cmd clean {
+        }
     }
 }
 // generated start
@@ -26,6 +29,7 @@ pub struct Xtask {
 pub enum XtaskCmd {
     Help(Help),
     Install(Install),
+    Clean(Clean),
 }
 
 #[derive(Debug)]
@@ -40,6 +44,9 @@ pub struct Install {
     pub console: bool,
     pub debug: bool,
 }
+
+#[derive(Debug)]
+pub struct Clean;
 
 impl Xtask {
     pub const HELP: &'static str = Self::HELP_;

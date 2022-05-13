@@ -46,6 +46,17 @@ impl flags::Install {
     }
 }
 
+impl flags::Clean {
+    pub(crate) fn run(self, sh: &Shell) -> anyhow::Result<()> {
+        {
+          let _dir = sh.push_dir("./vscode");
+          cmd!(sh, "npm run clean").run()?;
+        }
+        cmd!(sh, "cargo clean").run()?;
+        Ok(())
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     let sh = &Shell::new()?;
     sh.change_dir(project_root());
@@ -57,5 +68,6 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         flags::XtaskCmd::Install(cmd) => cmd.run(sh),
+        flags::XtaskCmd::Clean(cmd) => cmd.run(sh),
     }
 }

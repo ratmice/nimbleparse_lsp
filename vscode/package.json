@@ -46,7 +46,8 @@
     "watch": "tsc -watch -p ./",
     "pretest": "npm run compile && npm run lint",
     "lint": "eslint src --ext ts",
-    "test": "node ./tsbuild/test/runTest.js"
+    "test": "node ./tsbuild/test/runTest.js",
+    "clean": "rm -rf tsbuild node_modules"
   },
   "dependencies": {
     "vscode-languageclient": "^7.0.0"
