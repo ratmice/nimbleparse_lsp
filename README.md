@@ -64,7 +64,8 @@ cargo run --bin xtask -- install --server
 Then follow the configuration in [neovim/](neovim/README.md) 
 
 ## Developer options
-Append `--console` to the install command, to enable tokio-console support. 
+* `--console` to the install command, to enable tokio-console support. 
+* `--debug` to install with debug symbols.
 
 ## Projects
 [Crimson](https://github.com/ratmice/crimson)
