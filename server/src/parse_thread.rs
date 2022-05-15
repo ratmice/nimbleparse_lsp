@@ -54,6 +54,28 @@ struct File {
     version: Option<i32>,
 }
 
+impl File {
+    fn span_to_range(&self, span: &cfgrammar::Span) -> lsp::Range {
+        let start_line = self.contents.byte_to_line(span.start());
+        let start_line_char_idx = self.contents.line_to_char(start_line) as u32;
+        let start_pos_char_idx = self.contents.byte_to_char(span.start()) as u32;
+
+        let end_line = self.contents.byte_to_line(span.end());
+        let end_line_char_idx = self.contents.line_to_char(end_line) as u32;
+        let end_pos_char_idx = self.contents.byte_to_char(span.end()) as u32;
+        lsp::Range {
+            start: lsp::Position {
+                line: start_line as u32,
+                character: start_pos_char_idx - start_line_char_idx,
+            },
+            end: lsp::Position {
+                line: end_line as u32,
+                character: end_pos_char_idx - end_line_char_idx,
+            },
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum StateGraphPretty {
     CoreStates,
@@ -141,21 +163,73 @@ impl ParseThread {
                                             } else {
                                                 0 != c.sr_len()
                                             };
-
                                             if pp_rr {
-                                                yacc_diags.push(lsp::Diagnostic {
-                                                    severity: Some(lsp::DiagnosticSeverity::ERROR),
-                                                    message: c.pp_rr(&grm),
-                                                    ..Default::default()
-                                                });
+                                                for (r1_prod_idx, r2_prod_idx, _st_idx) in
+                                                    c.rr_conflicts()
+                                                {
+                                                    // So this is giving spans on left hand side of
+                                                    // the rules.  I'm not sure that's really what we
+                                                    // want?
+                                                    let r1_ridx = grm.prod_to_rule(*r1_prod_idx);
+                                                    let r2_ridx = grm.prod_to_rule(*r2_prod_idx);
+                                                    let span1 = grm.rule_span(r1_ridx);
+                                                    let span2 = grm.rule_span(r2_ridx);
+                                                    if let Some(span1) = span1 {
+                                                        let r1_name = grm.rule_name(r1_ridx);
+                                                        let r2_name = grm.rule_name(r1_ridx);
+                                                        yacc_diags.push(lsp::Diagnostic {
+                                                            range: yacc_file.span_to_range(span1),
+                                                            severity: Some(lsp::DiagnosticSeverity::ERROR),
+                                                            message: format!("Reduce({r1_name})/Reduce({r2_name})"),
+                                                            related_information: Some(vec![
+                                                                lsp::DiagnosticRelatedInformation {
+                                                                    location: lsp::Location{
+                                                                        uri: yacc_url.clone(),
+                                                                        range: yacc_file.span_to_range(span2.unwrap()),
+                                                                    },
+                                                                    message: "Second Reduce".to_string(),
+                                                                }
+                                                            ]),
+                                                            ..Default::default()
+                                                        });
+                                                    }
+                                                }
                                             }
 
                                             if pp_sr {
-                                                yacc_diags.push(lsp::Diagnostic {
-                                                    severity: Some(lsp::DiagnosticSeverity::ERROR),
-                                                    message: c.pp_sr(&grm),
-                                                    ..Default::default()
-                                                });
+                                                for (s_tok_idx, r_prod_idx, _st_idx) in
+                                                    c.sr_conflicts()
+                                                {
+                                                    // So this is giving spans on left hand side of
+                                                    // the rule. and the first instance of the token,
+                                                    // I'm certain that is not what we want.
+                                                    //
+                                                    // It seems like this should point to the span
+                                                    // of a specific production.
+                                                    let r_rule_idx = grm.prod_to_rule(*r_prod_idx);
+                                                    let span2 = grm.token_span(*s_tok_idx);
+                                                    let span1 = grm.rule_span(r_rule_idx);
+                                                    if let Some(span1) = span1 {
+                                                        let shift_name =
+                                                            grm.token_name(*s_tok_idx).unwrap();
+                                                        let reduce_name = grm.rule_name(r_rule_idx);
+                                                        yacc_diags.push(lsp::Diagnostic {
+                                                            range: yacc_file.span_to_range(span1),
+                                                            severity: Some(lsp::DiagnosticSeverity::ERROR),
+                                                            message: format!("Shift({shift_name})/Reduce({reduce_name}) conflict."),
+                                                            related_information: Some(vec![
+                                                                lsp::DiagnosticRelatedInformation {
+                                                                    location: lsp::Location{
+                                                                        uri: yacc_url.clone(),
+                                                                        range: yacc_file.span_to_range(span2.unwrap()),
+                                                                    },
+                                                                    message: "Reduce".to_string(),
+                                                                }
+                                                            ]),
+                                                            ..Default::default()
+                                                        });
+                                                    }
+                                                }
                                             }
                                         }
                                     }
@@ -196,36 +270,8 @@ impl ParseThread {
                                                     if let Some(rule) =
                                                         lexerdef.get_rule_by_name(token)
                                                     {
-                                                        let span = rule.name_span;
-                                                        let start_line = lex_file
-                                                            .contents
-                                                            .byte_to_line(span.start());
-                                                        let start_line_char_idx = lex_file
-                                                            .contents
-                                                            .line_to_char(start_line)
-                                                            as u32;
-                                                        let start_pos_char_idx = lex_file
-                                                            .contents
-                                                            .byte_to_char(span.start())
-                                                            as u32;
-
-                                                        let end_line = lex_file
-                                                            .contents
-                                                            .byte_to_line(span.end());
-                                                        let end_line_char_idx = lex_file
-                                                            .contents
-                                                            .line_to_char(end_line)
-                                                            as u32;
-                                                        let end_pos_char_idx = lex_file
-                                                            .contents
-                                                            .byte_to_char(span.end())
-                                                            as u32;
-
                                                         lex_diags.push(lsp::Diagnostic {
-                                                            range: lsp::Range {
-                                                                start: lsp::Position { line: start_line as u32, character: start_pos_char_idx - start_line_char_idx},
-                                                                end: lsp::Position { line: end_line as u32, character: end_pos_char_idx - end_line_char_idx}
-                                                            },
+                                                            range: lex_file.span_to_range(&rule.name_span),
                                                             severity: Some(lsp::DiagnosticSeverity::WARNING),
                                                             message: format!("token '{}' is defined in the lexer but not referenced in the grammar.", token),
                                                             ..Default::default()
@@ -245,35 +291,8 @@ impl ParseThread {
                                                 let token_idx = grm.token_idx(token);
                                                 if let Some(token_idx) = token_idx {
                                                     if let Some(span) = grm.token_span(token_idx) {
-                                                        let start_line = yacc_file
-                                                            .contents
-                                                            .byte_to_line(span.start());
-                                                        let start_line_char_idx = yacc_file
-                                                            .contents
-                                                            .line_to_char(start_line)
-                                                            as u32;
-                                                        let start_pos_char_idx = yacc_file
-                                                            .contents
-                                                            .byte_to_char(span.start())
-                                                            as u32;
-
-                                                        let end_line = yacc_file
-                                                            .contents
-                                                            .byte_to_line(span.end());
-                                                        let end_line_char_idx = yacc_file
-                                                            .contents
-                                                            .line_to_char(end_line)
-                                                            as u32;
-                                                        let end_pos_char_idx = yacc_file
-                                                            .contents
-                                                            .byte_to_char(span.end())
-                                                            as u32;
-
                                                         yacc_diags.push(lsp::Diagnostic {
-                                                            range: lsp::Range {
-                                                                start: lsp::Position { line: start_line as u32, character: start_pos_char_idx - start_line_char_idx},
-                                                                end: lsp::Position { line: end_line as u32, character: end_pos_char_idx - end_line_char_idx}
-                                                            },
+                                                            range: yacc_file.span_to_range(span),
                                                             severity: Some(lsp::DiagnosticSeverity::ERROR),
                                                             message: format!("the token '{}' is referenced in the grammar but not defined in the lexer.", token),
                                                             ..Default::default()
@@ -302,14 +321,14 @@ impl ParseThread {
                         }
                         Err(e) => {
                             let _ = stuff.take();
-                            // We can do better than this.
+                            // Some of these still lack spans
                             match &e {
                                 cfgrammar::yacc::YaccGrammarError::YaccParserError(
                                     _parse_error,
                                 ) => {
                                     yacc_diags.push(lsp::Diagnostic {
                                         severity: Some(lsp::DiagnosticSeverity::ERROR),
-                                        message: e.to_string(),
+                                        message: format!("Validation error: {}", e.to_string()),
                                         ..Default::default()
                                     });
                                 }
@@ -323,11 +342,35 @@ impl ParseThread {
                                     });
 
                                     match &validation_error.sym {
-                                        Some(cfgrammar::yacc::ast::Symbol::Token(_tok_name)) => {
-                                            // Here we have a string for tokens but still can't get the span because
-                                            // we lack a YaccGrammar, I suppose the error should return it.
+                                        Some(cfgrammar::yacc::ast::Symbol::Token(_name, None))
+                                        | Some(cfgrammar::yacc::ast::Symbol::Rule(_name, None)) => {
+                                            yacc_diags.push(lsp::Diagnostic {
+                                                severity: Some(lsp::DiagnosticSeverity::ERROR),
+                                                message: format!(
+                                                    "{} for unknown span",
+                                                    &e.to_string()
+                                                ),
+                                                ..Default::default()
+                                            });
                                         }
-                                        Some(cfgrammar::yacc::ast::Symbol::Rule(_rule_name)) => {}
+                                        Some(cfgrammar::yacc::ast::Symbol::Token(
+                                            _name,
+                                            Some(span),
+                                        ))
+                                        | Some(cfgrammar::yacc::ast::Symbol::Rule(
+                                            _name,
+                                            Some(span),
+                                        )) => {
+                                            yacc_diags.push(lsp::Diagnostic {
+                                                range: yacc_file.span_to_range(span),
+                                                severity: Some(lsp::DiagnosticSeverity::ERROR),
+                                                message: format!(
+                                                    "Validation error: {}",
+                                                    &e.to_string()
+                                                ),
+                                                ..Default::default()
+                                            });
+                                        }
                                         None => {}
                                     }
                                 }
@@ -434,35 +477,8 @@ impl ParseThread {
                     }
                 };
 
-                let start = span.start();
-                let end = span.end();
-
-                let line_of_start = file.contents.byte_to_line(start);
-                let line_start_cidx = file.contents.line_to_char(line_of_start);
-                let start_cidx = file.contents.byte_to_char(start);
-                let start_offset = start_cidx - line_start_cidx;
-
-                let line_of_end = file.contents.byte_to_line(end);
-                let line_end_cidx = file.contents.line_to_char(line_of_end);
-                let end_cidx = file.contents.byte_to_char(end);
-                let end_offset = end_cidx - line_end_cidx;
-
-                let start_pos = lsp::Position {
-                    line: line_of_start as u32,
-                    character: start_offset as u32,
-                };
-
-                let end_pos = lsp::Position {
-                    line: line_of_end as u32,
-                    character: end_offset as u32,
-                };
-                let range = lsp::Range {
-                    start: start_pos,
-                    end: end_pos,
-                };
-
                 let diag = lsp::Diagnostic {
-                    range,
+                    range: file.span_to_range(&span),
                     message,
                     ..Default::default()
                 };
