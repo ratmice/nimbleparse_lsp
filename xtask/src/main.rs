@@ -29,7 +29,11 @@ impl flags::Install {
                 } else {
                     sh.push_env("RUSTFLAGS", "--cfg tokio_unstable")
                 };
-                cmd!(sh,"cargo install {debug_args...} {server_args...} {console_args...}").run()?;
+                cmd!(
+                    sh,
+                    "cargo install {debug_args...} {server_args...} {console_args...}"
+                )
+                .run()?;
             } else {
                 cmd!(sh, "cargo install {debug_args...} {server_args...}").run()?;
             }
@@ -49,8 +53,8 @@ impl flags::Install {
 impl flags::Clean {
     pub(crate) fn run(self, sh: &Shell) -> anyhow::Result<()> {
         {
-          let _dir = sh.push_dir("./vscode");
-          cmd!(sh, "npm run clean").run()?;
+            let _dir = sh.push_dir("./vscode");
+            cmd!(sh, "npm run clean").run()?;
         }
         cmd!(sh, "cargo clean").run()?;
         Ok(())
