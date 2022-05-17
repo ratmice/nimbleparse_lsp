@@ -55,7 +55,7 @@ struct File {
 }
 
 impl File {
-    fn span_to_range(&self, span: &cfgrammar::Span) -> lsp::Range {
+    fn span_to_range(&self, span: cfgrammar::Span) -> lsp::Range {
         let start_line = self.contents.byte_to_line(span.start());
         let start_line_char_idx = self.contents.line_to_char(start_line) as u32;
         let start_pos_char_idx = self.contents.byte_to_char(span.start()) as u32;
@@ -172,11 +172,10 @@ impl ParseThread {
                                                     // want?
                                                     let r1_ridx = grm.prod_to_rule(*r1_prod_idx);
                                                     let r2_ridx = grm.prod_to_rule(*r2_prod_idx);
-                                                    let span1 = grm.rule_span(r1_ridx);
-                                                    let span2 = grm.rule_span(r2_ridx);
-                                                    if let Some(span1) = span1 {
-                                                        let r1_name = grm.rule_name(r1_ridx);
-                                                        let r2_name = grm.rule_name(r1_ridx);
+                                                    let span1 = grm.rule_name_span(r1_ridx);
+                                                    let span2 = grm.rule_name_span(r2_ridx);
+                                                        let r1_name = grm.rule_name_str(r1_ridx);
+                                                        let r2_name = grm.rule_name_str(r1_ridx);
                                                         yacc_diags.push(lsp::Diagnostic {
                                                             range: yacc_file.span_to_range(span1),
                                                             severity: Some(lsp::DiagnosticSeverity::ERROR),
@@ -185,14 +184,13 @@ impl ParseThread {
                                                                 lsp::DiagnosticRelatedInformation {
                                                                     location: lsp::Location{
                                                                         uri: yacc_url.clone(),
-                                                                        range: yacc_file.span_to_range(span2.unwrap()),
+                                                                        range: yacc_file.span_to_range(span2),
                                                                     },
                                                                     message: "Second Reduce".to_string(),
                                                                 }
                                                             ]),
                                                             ..Default::default()
                                                         });
-                                                    }
                                                 }
                                             }
 
@@ -208,11 +206,10 @@ impl ParseThread {
                                                     // of a specific production.
                                                     let r_rule_idx = grm.prod_to_rule(*r_prod_idx);
                                                     let span2 = grm.token_span(*s_tok_idx);
-                                                    let span1 = grm.rule_span(r_rule_idx);
-                                                    if let Some(span1) = span1 {
+                                                    let span1 = grm.rule_name_span(r_rule_idx);
                                                         let shift_name =
                                                             grm.token_name(*s_tok_idx).unwrap();
-                                                        let reduce_name = grm.rule_name(r_rule_idx);
+                                                        let reduce_name = grm.rule_name_str(r_rule_idx);
                                                         yacc_diags.push(lsp::Diagnostic {
                                                             range: yacc_file.span_to_range(span1),
                                                             severity: Some(lsp::DiagnosticSeverity::ERROR),
@@ -221,14 +218,13 @@ impl ParseThread {
                                                                 lsp::DiagnosticRelatedInformation {
                                                                     location: lsp::Location{
                                                                         uri: yacc_url.clone(),
-                                                                        range: yacc_file.span_to_range(span2.unwrap()),
+                                                                        range: yacc_file.span_to_range(*span2.unwrap()),
                                                                     },
                                                                     message: "Reduce".to_string(),
                                                                 }
                                                             ]),
                                                             ..Default::default()
                                                         });
-                                                    }
                                                 }
                                             }
                                         }
@@ -271,7 +267,7 @@ impl ParseThread {
                                                         lexerdef.get_rule_by_name(token)
                                                     {
                                                         lex_diags.push(lsp::Diagnostic {
-                                                            range: lex_file.span_to_range(&rule.name_span),
+                                                            range: lex_file.span_to_range(rule.name_span),
                                                             severity: Some(lsp::DiagnosticSeverity::WARNING),
                                                             message: format!("token '{}' is defined in the lexer but not referenced in the grammar.", token),
                                                             ..Default::default()
@@ -292,7 +288,7 @@ impl ParseThread {
                                                 if let Some(token_idx) = token_idx {
                                                     if let Some(span) = grm.token_span(token_idx) {
                                                         yacc_diags.push(lsp::Diagnostic {
-                                                            range: yacc_file.span_to_range(span),
+                                                            range: yacc_file.span_to_range(*span),
                                                             severity: Some(lsp::DiagnosticSeverity::ERROR),
                                                             message: format!("the token '{}' is referenced in the grammar but not defined in the lexer.", token),
                                                             ..Default::default()
@@ -342,27 +338,16 @@ impl ParseThread {
                                     });
 
                                     match &validation_error.sym {
-                                        Some(cfgrammar::yacc::ast::Symbol::Token(_name, None))
-                                        | Some(cfgrammar::yacc::ast::Symbol::Rule(_name, None)) => {
-                                            yacc_diags.push(lsp::Diagnostic {
-                                                severity: Some(lsp::DiagnosticSeverity::ERROR),
-                                                message: format!(
-                                                    "{} for unknown span",
-                                                    &e.to_string()
-                                                ),
-                                                ..Default::default()
-                                            });
-                                        }
                                         Some(cfgrammar::yacc::ast::Symbol::Token(
                                             _name,
-                                            Some(span),
+                                            span,
                                         ))
                                         | Some(cfgrammar::yacc::ast::Symbol::Rule(
                                             _name,
-                                            Some(span),
+                                            span,
                                         )) => {
                                             yacc_diags.push(lsp::Diagnostic {
-                                                range: yacc_file.span_to_range(span),
+                                                range: yacc_file.span_to_range(*span),
                                                 severity: Some(lsp::DiagnosticSeverity::ERROR),
                                                 message: format!(
                                                     "Validation error: {}",
@@ -478,7 +463,7 @@ impl ParseThread {
                 };
 
                 let diag = lsp::Diagnostic {
-                    range: file.span_to_range(&span),
+                    range: file.span_to_range(span),
                     message,
                     ..Default::default()
                 };

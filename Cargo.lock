@@ -636,6 +636,7 @@ dependencies = [
 name = "lrlex"
 version = "0.12.0"
 dependencies = [
+ "cfgrammar",
  "getopts",
  "lazy_static",
  "lrpar",
