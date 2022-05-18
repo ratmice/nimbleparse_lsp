@@ -124,7 +124,7 @@ export function activate(context: vscode.ExtensionContext) {
             if (uri.scheme == "nimbleparse_lsp") {
                 // Turn nimbleparse_lsp_cmd://command/path into a ServerDocumentRequest
                 let cmd = uri.authority;
-                let path = uri.path;
+                let path = uri.query;
                 let params: ServerDocumentParams = { cmd: cmd, path: path};
 
                 return lspClient.sendRequest(ServerDocumentRequest.type, params).then((response) => {
@@ -132,7 +132,6 @@ export function activate(context: vscode.ExtensionContext) {
                 });
             }
         }
-
         get onDidChange(): vscode.Event<vscode.Uri> {
             return this.eventEmitter.event;
         }
@@ -141,7 +140,10 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.workspace.registerTextDocumentContentProvider('nimbleparse_lsp', cmd_scheme_provider)
     );
 
-    showServerDocumentCommand(context, 'statetable', cmd_scheme_provider);
+    showServerDocumentCommand(context, 'stategraph_core_states', cmd_scheme_provider);
+    showServerDocumentCommand(context, 'stategraph_closed_states', cmd_scheme_provider);
+    showServerDocumentCommand(context, 'stategraph_core_edges', cmd_scheme_provider);
+    showServerDocumentCommand(context, 'stategraph_all_edges', cmd_scheme_provider);
     showServerDocumentCommand(context, 'generictree', cmd_scheme_provider);
 
 }
@@ -152,7 +154,10 @@ function showServerDocumentCommand(context: vscode.ExtensionContext, command: st
         vscode.commands.registerCommand(vscode_command, async () => {
             let uri: Uri | undefined = vscode.window.activeTextEditor?.document.uri;
             if (uri) {
-                let cmd_scheme_uri = Uri.from({scheme: "nimbleparse_lsp", authority: command.concat('.cmd'), path: uri?.fsPath})
+                // Send the path in the query string, then use the command name as the path.
+                // This is to give the document a name other the source filename from which the command derives.
+                // But also to keep hover from spewing errors 'expected relative URL without a base'.
+                let cmd_scheme_uri = Uri.from({scheme: "nimbleparse_lsp", authority: command.concat('.cmd'), path: '/' + command, query: uri?.fsPath})
                 provider.eventEmitter.fire(cmd_scheme_uri);
                 vscode.workspace.openTextDocument(cmd_scheme_uri).then((textdoc) => {
                     vscode.window.showTextDocument(textdoc, vscode.ViewColumn.Two, true);

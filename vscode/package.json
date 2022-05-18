@@ -16,18 +16,22 @@
   ],
   "main": "./tsbuild/extension.js",
   "contributes": {
-    "languages": [
-      {
-        "id": "crimson",
-        "extensions": [
-          "crimson"
-        ]
-      }
-    ],
     "commands": [
       {
-        "command": "nimbleparse_lsp.statetable",
-        "title": "Show parser state table"
+        "command": "nimbleparse_lsp.stategraph_core_states",
+        "title": "Show parser core states"
+      },
+      {
+        "command": "nimbleparse_lsp.stategraph_closed_states",
+        "title": "Show parser closed states"
+      },
+      {
+        "command": "nimbleparse_lsp.stategraph_core_edges",
+        "title": "Show parser core states & edges"
+      },
+      {
+        "command": "nimbleparse_lsp.stategraph_all_edges",
+        "title": "Show parser states & edges"
       },
       {
         "command": "nimbleparse_lsp.generictree",

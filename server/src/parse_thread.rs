@@ -55,6 +55,14 @@ struct File {
 }
 
 #[derive(Debug)]
+pub enum StateGraphPretty {
+    CoreStates,
+    ClosedStates,
+    CoreEdges,
+    AllEdges,
+}
+
+#[derive(Debug)]
 pub enum ParserMsg {
     Info(String),
     ProgressStart(i32),
@@ -570,15 +578,20 @@ impl ParseThread {
                                 }
                             }
                         }
-
-                        M::StateTable(channel) => {
+                        M::StateGraph(channel, pretty_printer) => {
                             if let Some((_, grm, sgraph, _)) = &stuff {
-                                let state_table = sgraph.pp_core_states(&grm);
-                                channel.send(Some(state_table)).unwrap();
+                                let states = match pretty_printer {
+                                    StateGraphPretty::CoreStates => sgraph.pp_core_states(&grm),
+                                    StateGraphPretty::ClosedStates => sgraph.pp_closed_states(&grm),
+                                    StateGraphPretty::CoreEdges => sgraph.pp(&grm, true),
+                                    StateGraphPretty::AllEdges => sgraph.pp(&grm, false),
+                                };
+                                channel.send(Some(states)).unwrap();
                             } else {
                                 channel.send(None).unwrap();
                             }
                         }
+
                         M::GenericTree(channel, file_path) => {
                             if let Some((lexerdef, grm, _, _)) = &stuff {
                                 if let Some(file) = files.get(&file_path) {

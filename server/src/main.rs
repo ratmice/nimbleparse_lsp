@@ -228,14 +228,18 @@ impl State {
     }
 }
 
+use parse_thread::StateGraphPretty;
 #[derive(Debug)]
 pub enum EditorMsg {
     DidChange(lsp::DidChangeTextDocumentParams),
     DidOpen(lsp::DidOpenTextDocumentParams),
-    StateTable(tokio::sync::oneshot::Sender<Option<String>>),
     GenericTree(
         tokio::sync::oneshot::Sender<Option<String>>,
         std::path::PathBuf,
+    ),
+    StateGraph(
+        tokio::sync::oneshot::Sender<Option<String>>,
+        parse_thread::StateGraphPretty,
     ),
 }
 
@@ -253,19 +257,7 @@ impl Backend {
         params: ServerDocumentParams,
     ) -> jsonrpc::Result<Option<String>> {
         let state = self.state.lock().await;
-        if params.cmd == "statetable.cmd" {
-            let path = std::path::PathBuf::from(&params.path);
-            let parser_info = state.find_parser_info(&path);
-            if let Some(parser_info) = parser_info {
-                let (send, recv) = tokio::sync::oneshot::channel();
-                let receiver = &state.parser_channels[parser_info.id];
-                receiver.send(EditorMsg::StateTable(send)).unwrap();
-                let statetable_text = recv.await.unwrap_or(None);
-                Ok(statetable_text)
-            } else {
-                Ok(None)
-            }
-        } else if params.cmd == "generictree.cmd" {
+        if params.cmd == "generictree.cmd" {
             let path = std::path::PathBuf::from(&params.path);
             let parser_info = state.parser_for(&path);
             if let Some(parser_info) = parser_info {
@@ -274,6 +266,34 @@ impl Backend {
                 receiver.send(EditorMsg::GenericTree(send, path)).unwrap();
                 let statetable_text = recv.await.unwrap_or(None);
                 Ok(statetable_text)
+            } else {
+                Ok(None)
+            }
+        } else if params.cmd.starts_with("stategraph_") && params.cmd.ends_with(".cmd") {
+            let path = std::path::PathBuf::from(&params.path);
+            let parser_info = state.find_parser_info(&path);
+            let property = params
+                .cmd
+                .strip_prefix("stategraph_")
+                .unwrap()
+                .strip_suffix(".cmd")
+                .unwrap();
+            if let Some(parser_info) = parser_info {
+                let pretty_printer = match property {
+                    "core_states" => StateGraphPretty::CoreStates,
+                    "closed_states" => StateGraphPretty::ClosedStates,
+                    "core_edges" => StateGraphPretty::CoreEdges,
+                    "all_edges" => StateGraphPretty::AllEdges,
+                    _ => return Ok(None),
+                };
+                let (send, recv) = tokio::sync::oneshot::channel();
+
+                let receiver = &state.parser_channels[parser_info.id];
+                receiver
+                    .send(EditorMsg::StateGraph(send, pretty_printer))
+                    .unwrap();
+                let stategraph_text = recv.await.unwrap_or(None);
+                Ok(stategraph_text)
             } else {
                 Ok(None)
             }
@@ -491,7 +511,7 @@ impl tower_lsp::LanguageServer for Backend {
         ])))
     }
 
-    async fn hover(&self, _: lsp::HoverParams) -> jsonrpc::Result<Option<lsp::Hover>> {
+    async fn hover(&self, _params: lsp::HoverParams) -> jsonrpc::Result<Option<lsp::Hover>> {
         Ok(Some(lsp::Hover {
             contents: lsp::HoverContents::Scalar(lsp::MarkedString::String(
                 "You're hovering!".to_string(),
