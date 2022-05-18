@@ -122,7 +122,7 @@ export function activate(context: vscode.ExtensionContext) {
         readonly eventEmitter = new vscode.EventEmitter<vscode.Uri>();
         provideTextDocumentContent(uri: vscode.Uri, token: vscode.CancellationToken): vscode.ProviderResult<string> {
             if (uri.scheme == "nimbleparse_lsp") {
-                // Turn nimbleparse_lsp_cmd://command/path into a ServerDocumentRequest
+                // Turn nimbleparse_lsp_cmd://command/path_vscode_displays?path into a ServerDocumentRequest
                 let cmd = uri.authority;
                 let path = uri.query;
                 let params: ServerDocumentParams = { cmd: cmd, path: path};
