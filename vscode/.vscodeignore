@@ -5,6 +5,7 @@ src/**
 .yarnrc
 tsbuild/
 !tsbuild/extension.js
+!tsbuild/bin
 vsc-extension-quickstart.md
 **/tsconfig.json
 **/.eslintrc.json
@@ -15,3 +16,5 @@ vsc-extension-quickstart.md
 node_modules
 src/
 tsconfig.json
+.crates.toml
+.crates2.json
