@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import { Uri } from 'vscode';
-
+import * as fs from 'fs';
 import {
     Executable,
 	LanguageClient,
@@ -43,13 +43,9 @@ interface ServerDocumentParams {
 }
 
 export function activate(context: vscode.ExtensionContext) {
-    // This might be needed eventually if we distribute the nimbleparse_lsp binary
-    // inside the package or download it from the package,
-    //
-    // Currently we rely on this having been installed into PATH as part of the build process,
-    // const lsp_path_relative = path.resolve(__dirname, "nimbleparse_lsp");
-
-    const lsp_path = "nimbleparse_lsp";
+    const lsp_path_relative = path.resolve(path.join(__dirname, "bin"), "nimbleparse_lsp");
+    // Try and find it relative to the extension, or fall back to the PATH.
+    const lsp_path = fs.existsSync(lsp_path_relative) ? lsp_path_relative : "nimbleparse_lsp";
 
     // This doesn't quite work if we have a project `foo/`
     // and a `foo/bar/nimbleparse.toml`.
