@@ -524,12 +524,7 @@ impl tower_lsp::LanguageServer for Backend {
     }
 
     async fn hover(&self, _params: lsp::HoverParams) -> jsonrpc::Result<Option<lsp::Hover>> {
-        Ok(Some(lsp::Hover {
-            contents: lsp::HoverContents::Scalar(lsp::MarkedString::String(
-                "You're hovering!".to_string(),
-            )),
-            range: None,
-        }))
+        Ok(None)
     }
 
     async fn did_change(&self, params: lsp::DidChangeTextDocumentParams) {
