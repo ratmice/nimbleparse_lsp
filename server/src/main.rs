@@ -241,6 +241,7 @@ pub enum EditorMsg {
         tokio::sync::oneshot::Sender<Option<String>>,
         parse_thread::StateGraphPretty,
     ),
+    Railroad(tokio::sync::oneshot::Sender<Option<String>>),
 }
 
 fn initialize_failed(reason: String) -> jsonrpc::Result<lsp::InitializeResult> {
@@ -287,11 +288,22 @@ impl Backend {
                     _ => return Ok(None),
                 };
                 let (send, recv) = tokio::sync::oneshot::channel();
-
                 let receiver = &state.parser_channels[parser_info.id];
                 receiver
                     .send(EditorMsg::StateGraph(send, pretty_printer))
                     .unwrap();
+                let stategraph_text = recv.await.unwrap_or(None);
+                Ok(stategraph_text)
+            } else {
+                Ok(None)
+            }
+        } else if params.cmd.starts_with("railroad.svg") && params.cmd.ends_with(".cmd") {
+            let path = std::path::PathBuf::from(&params.path);
+            let parser_info = state.find_parser_info(&path);
+            if let Some(parser_info) = parser_info {
+                let (send, recv) = tokio::sync::oneshot::channel();
+                let receiver = &state.parser_channels[parser_info.id];
+                receiver.send(EditorMsg::Railroad(send)).unwrap();
                 let stategraph_text = recv.await.unwrap_or(None);
                 Ok(stategraph_text)
             } else {

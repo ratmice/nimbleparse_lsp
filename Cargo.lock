@@ -486,6 +486,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "htmlescape"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e9025058dae765dee5070ec375f591e2ba14638c63feff74f13805a72e523163"
+
+[[package]]
 name = "http"
 version = "0.2.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -783,6 +789,7 @@ dependencies = [
  "lrtable",
  "nimbleparse_toml",
  "num-traits",
+ "railroad",
  "ropey",
  "serde",
  "serde-transcode",
@@ -994,6 +1001,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a1feb54ed693b93a84e14094943b84b7c4eae204c512b7ccb95ab0c66d278ad1"
 dependencies = [
  "proc-macro2",
+]
+
+[[package]]
+name = "railroad"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "59c47c4d3be383b581ee4f7e7b1858c1ea6d717736780257052fa601de3047a9"
+dependencies = [
+ "htmlescape",
+ "unicode-width",
 ]
 
 [[package]]

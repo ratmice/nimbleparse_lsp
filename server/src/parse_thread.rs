@@ -591,6 +591,116 @@ impl ParseThread {
                                 channel.send(None).unwrap();
                             }
                         }
+                        M::Railroad(channel) => {
+                            if let Some((_, grm, _, _)) = &stuff {
+                                let mut node_idxs = std::collections::HashMap::new();
+                                let mut sequences: Vec<railroad::Sequence> = Vec::new();
+                                for (foo, ridx) in grm.iter_rules().enumerate() {
+                                    let name = grm.rule_name(ridx);
+                                    let symbol = cfgrammar::Symbol::Rule(ridx);
+                                    node_idxs.insert(symbol, foo);
+                                    sequences.push(railroad::Sequence::new(vec![Box::new(
+                                        railroad::Comment::new(name.to_string()),
+                                    )]));
+                                }
+
+                                for (foo, tidx) in grm.iter_tidxs().enumerate() {
+                                    let symbol = cfgrammar::Symbol::Token(tidx);
+                                    node_idxs.insert(symbol, foo);
+                                }
+
+                                for ridx in grm.iter_rules() {
+                                    let prods = grm.rule_to_prods(ridx);
+                                    let prod_syms = prods
+                                        .iter()
+                                        .map(|pidx| grm.prod(*pidx))
+                                        .collect::<Vec<_>>();
+                                    let seq = sequences
+                                        .get_mut(
+                                            *node_idxs.get(&cfgrammar::Symbol::Rule(ridx)).unwrap(),
+                                        )
+                                        .unwrap();
+
+                                    let mut choice = railroad::Choice::new(vec![]);
+                                    for symbols in prod_syms {
+                                        let mut a_seq = railroad::Sequence::new(vec![]);
+                                        if symbols.len() > 0 {
+                                            for symbol in symbols {
+                                                match symbol {
+                                                    cfgrammar::Symbol::Rule(prod_ridx)
+                                                        if prod_ridx == &ridx =>
+                                                    {
+                                                        let epsilon =
+                                                            grm.firsts().is_epsilon_set(ridx);
+                                                        if epsilon {
+                                                            a_seq.push(Box::new(
+                                                                railroad::Repeat::new(
+                                                                    Box::new(railroad::Empty),
+                                                                    Box::new(
+                                                                        railroad::NonTerminal::new(
+                                                                            grm.rule_name(
+                                                                                *prod_ridx,
+                                                                            )
+                                                                            .to_string(),
+                                                                        ),
+                                                                    ),
+                                                                ),
+                                                            ));
+                                                        } else {
+                                                            a_seq.push(Box::new(
+                                                                railroad::Repeat::new(
+                                                                    Box::new(
+                                                                        railroad::NonTerminal::new(
+                                                                            grm.rule_name(
+                                                                                *prod_ridx,
+                                                                            )
+                                                                            .to_string(),
+                                                                        ),
+                                                                    ),
+                                                                    Box::new(railroad::Empty),
+                                                                ),
+                                                            ));
+                                                        }
+                                                    }
+                                                    cfgrammar::Symbol::Rule(prod_ridx) => {
+                                                        a_seq.push(Box::new(
+                                                            railroad::NonTerminal::new(
+                                                                grm.rule_name(*prod_ridx)
+                                                                    .to_string(),
+                                                            ),
+                                                        ));
+                                                    }
+                                                    cfgrammar::Symbol::Token(tidx) => {
+                                                        a_seq.push(Box::new(
+                                                            railroad::Terminal::new(
+                                                                grm.token_name(*tidx)
+                                                                    .unwrap_or("anonymous")
+                                                                    .to_string(),
+                                                            ),
+                                                        ));
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        choice.push(a_seq);
+                                    }
+                                    seq.push(Box::new(choice));
+                                }
+                                let mut vert = railroad::VerticalGrid::new(vec![]);
+                                for i in sequences {
+                                    vert.push(Box::new(i));
+                                }
+                                let mut dia = railroad::Diagram::new(vert);
+                                dia.add_element(
+                                    railroad::svg::Element::new("style")
+                                        .set("type", "text/css")
+                                        .raw_text(railroad::DEFAULT_CSS),
+                                );
+                                channel.send(Some(format!("<html>{dia}</html>"))).unwrap()
+                            } else {
+                                channel.send(None).unwrap()
+                            }
+                        }
 
                         M::GenericTree(channel, file_path) => {
                             if let Some((lexerdef, grm, _, _)) = &stuff {

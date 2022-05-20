@@ -36,6 +36,10 @@
       {
         "command": "nimbleparse_lsp.generictree",
         "title": "Show generic parse tree"
+      },
+      {
+        "command": "nimbleparse_lsp.railroad.svg",
+        "title": "Generate railroad diagram"
       }
     ]
   },

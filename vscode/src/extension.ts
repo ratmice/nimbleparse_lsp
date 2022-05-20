@@ -145,7 +145,25 @@ export function activate(context: vscode.ExtensionContext) {
     showServerDocumentCommand(context, 'stategraph_core_edges', cmd_scheme_provider);
     showServerDocumentCommand(context, 'stategraph_all_edges', cmd_scheme_provider);
     showServerDocumentCommand(context, 'generictree', cmd_scheme_provider);
+    svgDocumentCommand(context, 'railroad.svg', cmd_scheme_provider);
+}
 
+function svgDocumentCommand(context: vscode.ExtensionContext, command: string, provider: vscode.TextDocumentContentProvider) {
+    const vscode_command = 'nimbleparse_lsp.'.concat(command);
+    context.subscriptions.push(
+        vscode.commands.registerCommand(vscode_command, async () => {
+            let uri: Uri | undefined = vscode.window.activeTextEditor?.document.uri;
+            if (uri) {
+                let cmd_scheme_uri = Uri.from({scheme: "nimbleparse_lsp", authority: command.concat('.cmd'), path: '/' + command, query: uri?.fsPath});
+                provider.eventEmitter.fire(cmd_scheme_uri);
+                let foo = vscode.window.createWebviewPanel(command, command, vscode.ViewColumn.Beside);
+                vscode.workspace.openTextDocument(cmd_scheme_uri).then((textdoc) => {
+                    foo.webview.html = textdoc.getText();
+                    foo.reveal(vscode.ViewColumn.Beside, true);
+                });
+            };
+        })
+    );
 }
 
 function showServerDocumentCommand(context: vscode.ExtensionContext, command: string, provider: vscode.TextDocumentContentProvider) {
@@ -160,8 +178,8 @@ function showServerDocumentCommand(context: vscode.ExtensionContext, command: st
                 let cmd_scheme_uri = Uri.from({scheme: "nimbleparse_lsp", authority: command.concat('.cmd'), path: '/' + command, query: uri?.fsPath})
                 provider.eventEmitter.fire(cmd_scheme_uri);
                 vscode.workspace.openTextDocument(cmd_scheme_uri).then((textdoc) => {
-                    vscode.window.showTextDocument(textdoc, vscode.ViewColumn.Two, true);
-                })
+                    vscode.window.showTextDocument(textdoc, {preview: true, viewColumn: vscode.ViewColumn.Beside, preserveFocus: true});
+                });
             };
         })
     );
