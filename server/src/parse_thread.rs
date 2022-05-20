@@ -123,7 +123,7 @@ impl ParseThread {
                     {
                         let mut lex_diags = Vec::new();
                         let mut yacc_diags = Vec::new();
-                        if !self.parser_info.quiet {
+                        let conflicts = if !self.parser_info.quiet {
                             if let Some(c) = stable.conflicts() {
                                 let pp_rr = if let Some(i) = grm.expectrr() {
                                     i != c.rr_len()
@@ -152,8 +152,13 @@ impl ParseThread {
                                         ..Default::default()
                                     });
                                 }
+                                pp_rr || pp_sr
+                            } else {
+                                false
                             }
-                        }
+                        } else {
+                            stable.conflicts().is_none()
+                        };
 
                         let rule_ids = &grm
                             .tokens_map()
@@ -212,7 +217,12 @@ impl ParseThread {
                             let mut sorted = tokens.iter().cloned().collect::<Vec<&str>>();
                             sorted.sort_unstable();
                         }
-                        stuff.replace((lexerdef, grm, sgraph, stable));
+
+                        if conflicts {
+                            stuff.take();
+                        } else {
+                            stuff.replace((lexerdef, grm, sgraph, stable));
+                        }
                     } else {
                         let _ = stuff.take();
                     }
