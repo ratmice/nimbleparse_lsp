@@ -71,7 +71,7 @@ jobs:
       - uses: actions/upload-artifact@v2
         with:
           name: ${{ env.target }}
-          path: "*.vsix"
+          path: "vscode/*.vsix"
   publish:
     runs-on: ubuntu-latest
     needs: build
