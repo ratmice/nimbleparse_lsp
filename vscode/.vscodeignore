@@ -5,7 +5,6 @@ src/**
 .yarnrc
 tsbuild/
 !tsbuild/extension.js
-!tsbuild/bin
 vsc-extension-quickstart.md
 **/tsconfig.json
 **/.eslintrc.json

@@ -67,7 +67,7 @@ jobs:
         working-directory: vscode
       - shell: pwsh
         run: echo "target=${{ matrix.platform }}-${{ matrix.arch }}" >> $env:GITHUB_ENV
-      - run: cargo install --path server --bin nimbleparse_lsp --root vscode/tsbuild
+      - run: cargo install --path server --bin nimbleparse_lsp --root vscode/
       - run: npx vsce package --target ${{ env.target }}
         working-directory: vscode
       - uses: actions/upload-artifact@v2

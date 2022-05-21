@@ -43,8 +43,8 @@ interface ServerDocumentParams {
 }
 
 export function activate(context: vscode.ExtensionContext) {
-    const lsp_path_relative = path.resolve(path.join(__dirname, "bin"), "nimbleparse_lsp");
-    const lsp_path_relative_exe = path.resolve(path.join(__dirname, "bin"), "nimbleparse_lsp.exe");
+    const lsp_path_relative = path.resolve(path.join(context.extensionPath, "bin"), "nimbleparse_lsp");
+    const lsp_path_relative_exe = path.resolve(path.join(context.extensionPath, "bin"), "nimbleparse_lsp.exe");
     // Try and find it relative to the extension, or fall back to the PATH.
     const lsp_path = fs.existsSync(lsp_path_relative) ? lsp_path_relative : (fs.existsSync(lsp_path_relative_exe) ? lsp_path_relative_exe : "nimbleparse_lsp");
 
