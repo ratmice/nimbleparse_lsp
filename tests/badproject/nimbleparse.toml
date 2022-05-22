@@ -29,13 +29,13 @@ y_file = "src/sr.y"
 extension = ".sr_conflict"
 
 [[tests]]
-dir = "tests"
+kind = {"Dir" = "tests/**"}
 pass = true
 
 [[tests]]
-dir = "tests"
+kind = {"Dir" = "tests/**"}
 pass = true
 
 [[tests]]
-dir = "nonexistent"
+kind = {"Dir" = "tests/**"}
 pass = false

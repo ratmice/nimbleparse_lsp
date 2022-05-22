@@ -2,7 +2,7 @@
   "name": "nimbleparse-lsp",
   "displayName": "nimbleparse lsp",
   "description": "lsp client for grmtools based on nimbleparse",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "license": "(MIT OR Apache-2.0)",
   "repository": "https://github.com/ratmice/nimbleparse_lsp",
   "publisher": "mattrice",
@@ -56,7 +56,7 @@
     "pretest": "npm run compile && npm run lint",
     "lint": "eslint src --ext ts",
     "test": "node ./tsbuild/test/runTest.js",
-    "clean": "rm -rf tsbuild node_modules"
+    "clean": "rm -rf tsbuild node_modules bin"
   },
   "dependencies": {
     "vscode-languageclient": "^7.0.0"
