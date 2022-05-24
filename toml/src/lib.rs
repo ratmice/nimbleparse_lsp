@@ -37,7 +37,7 @@ fn default_recovery_kind() -> RecoveryKind {
 // We should consider having a trait for it...
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum TestKind {
-    Dir (String),
+    Dir(String),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
