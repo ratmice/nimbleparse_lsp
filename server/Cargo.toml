@@ -24,6 +24,8 @@ tokio-stream = "0.1.8"
 ropey = "1.4.1"
 railroad = "0.1.1"
 glob = "0.3.0"
+toml-spanned-value = "0.1.0"
+globset = "0.4.8"
 
 [dependencies.console-subscriber]
 version = "0.1.4"

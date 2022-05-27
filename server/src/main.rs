@@ -3,7 +3,6 @@ mod peek_channel;
 
 use cfgrammar::yacc;
 use parse_thread::{ParseThread, ParserMsg};
-use serde;
 use tower_lsp::jsonrpc;
 use tower_lsp::lsp_types as lsp;
 
@@ -152,6 +151,7 @@ async fn process_parser_messages(
                         })
                         .await;
                 }
+                // This should probably be named something like ProgressInterrupt
                 ParserMsg::ProgressCancel(token) => {
                     let token = lsp::NumberOrString::Number(token);
 
@@ -186,32 +186,53 @@ struct State {
     warned_needs_restart: bool,
 }
 
+#[derive(serde::Deserialize, serde::Serialize, Debug)]
+struct TomlTest(Vec<toml::Spanned<String>>);
+
 impl State {
     fn affected_parsers(&self, path: &std::path::Path, ids: &mut Vec<usize>) {
         if let Some(extension) = path.extension() {
-            let id = self.extensions.get(extension).map(ParserInfo::id);
-            // A couple of corner cases here:
-            //
-            // * The kind of case where you have foo.l and bar.y/baz.y using the same lexer.
-            //    -- We should probably allow this case where editing a single file updates multiple parsers.
-            // * The kind of case where you have a yacc.y for the extension .y, so both the extension
-            //   and the parse_info have the same id.
-            //    -- We don't want to run the same parser multiple times: remove duplicates.
-            // In the general case, where you either change a .l, .y, or a file of the parsers extension
-            // this will be a vec of one element.
-            if let Some(id) = id {
-                ids.push(id);
+            // FIXME should be a globset of toml tests?
+            if extension == "toml" {
+                let stem = path.file_stem();
+                if let Some(stem) = stem {
+                    let stem = std::path::PathBuf::from(stem);
+                    let extension = stem.extension();
+                    if let Some(extension) = extension {
+                        let id = self.extensions.get(extension).map(ParserInfo::id);
+                        if let Some(id) = id {
+                            ids.push(id);
+                        }
+                    }
+                }
+            } else {
+                let id = self.extensions.get(extension).map(ParserInfo::id);
+
+                // A couple of corner cases here:
+                //
+                // * The kind of case where you have foo.l and bar.y/baz.y using the same lexer.
+                //    -- We should probably allow this case where editing a single file updates multiple parsers.
+                // * The kind of case where you have a yacc.y for the extension .y, so both the extension
+                //   and the parse_info have the same id.
+                //    -- We don't want to run the same parser multiple times: remove duplicates.
+                // In the general case, where you either change a .l, .y, or a file of the parsers extension
+                // this will be a vec of one element.
+                if let Some(id) = id {
+                    ids.push(id);
+                }
+
+                ids.extend(
+                    self.extensions
+                        .values()
+                        .filter(|parser_info| {
+                            path == parser_info.l_path || path == parser_info.y_path
+                        })
+                        .map(ParserInfo::id),
+                );
+
+                ids.sort_unstable();
+                ids.dedup();
             }
-
-            ids.extend(
-                self.extensions
-                    .values()
-                    .filter(|parser_info| path == parser_info.l_path || path == parser_info.y_path)
-                    .map(ParserInfo::id),
-            );
-
-            ids.sort_unstable();
-            ids.dedup();
         }
     }
 
@@ -223,8 +244,7 @@ impl State {
     }
 
     fn parser_for(&self, path: &std::path::Path) -> Option<&ParserInfo> {
-        path.extension()
-            .map_or(None, |ext| self.extensions.get(ext))
+        path.extension().and_then(|ext| self.extensions.get(ext))
     }
 }
 
@@ -397,8 +417,42 @@ impl tower_lsp::LanguageServer for Backend {
         let mut state = self.state.lock().await;
         let state = state.deref_mut();
         let mut globs: Vec<lsp::Registration> = Vec::new();
+
         if state.client_monitor {
             for WorkspaceCfg { workspace, .. } in state.toml.values() {
+                for test in &workspace.tests {
+                    if let nimbleparse_toml::TestKind::Toml {
+                        parser_extension: _parser_extension,
+                        toml_test_extension,
+                    } = test.kind.clone().into_inner()
+                    {
+                        self.client
+                            .log_message(
+                                lsp::MessageType::LOG,
+                                format!("registering toml test: {:?}", &test),
+                            )
+                            .await;
+
+                        let mut reg = serde_json::Map::new();
+                        reg.insert(
+                            "globPattern".to_string(),
+                            serde_json::value::Value::String(format!("*/{}", toml_test_extension)),
+                        );
+                        let mut watchers = serde_json::Map::new();
+                        watchers.insert(
+                            "watchers".to_string(),
+                            serde_json::value::Value::Array(vec![
+                                serde_json::value::Value::Object(reg),
+                            ]),
+                        );
+                        globs.push(lsp::Registration {
+                            id: "1".to_string(),
+                            method: "workspace/didChangeWatchedFiles".to_string(),
+                            register_options: Some(serde_json::value::Value::Object(watchers)),
+                        });
+                    }
+                }
+
                 for parser in workspace.parsers.get_ref() {
                     let glob = format!("**/*{}", parser.extension.get_ref());
                     let mut reg = serde_json::Map::new();
@@ -532,6 +586,7 @@ impl tower_lsp::LanguageServer for Backend {
         let url = params.text_document.uri.clone();
         let path = url.to_file_path();
         let nimbleparse_toml = std::ffi::OsStr::new("nimbleparse.toml");
+
         match path {
             Ok(path) if Some(nimbleparse_toml) == path.file_name() => {
                 if !state.warned_needs_restart {
@@ -594,6 +649,7 @@ impl tower_lsp::LanguageServer for Backend {
         let mut state = self.state.lock().await;
         let url = params.text_document.uri.clone();
         let path = url.to_file_path();
+
         match path {
             Ok(path) => {
                 let mut ids = vec![];
