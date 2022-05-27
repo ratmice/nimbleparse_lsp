@@ -5,7 +5,7 @@ use std::path::PathBuf;
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Workspace {
     pub parsers: toml::Spanned<Vec<Parser>>,
-    pub tests: Vec<TestDir>,
+    pub tests: Vec<Test>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -37,11 +37,14 @@ fn default_recovery_kind() -> RecoveryKind {
 // We should consider having a trait for it...
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum TestKind {
+    // path of glob e.g. "tests/pass/**"
     Dir(String),
+    // path to a ron file format to be determined
+    RonTests(PathBuf),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct TestDir {
+pub struct Test {
     pub kind: toml::Spanned<TestKind>,
     pub pass: bool,
 }

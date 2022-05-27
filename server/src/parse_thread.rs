@@ -236,28 +236,32 @@ impl ParseThread {
 
         change_set.clear();
 
-        for test_dir in self.test_dirs() {
-            let nimbleparse_toml::TestKind::Dir(glob) = test_dir.kind.clone().into_inner();
-            {
-                let abs_glob_as_path = self.workspace_path.join(glob);
-                let glob_str = abs_glob_as_path.to_str().unwrap();
-                let paths = glob::glob(glob_str);
-                if let Ok(paths) = paths {
-                    for test_dir_path in paths {
-                        if let Ok(test_dir_path) = test_dir_path {
-                            let files_of_extension = files.iter().filter(|(test_path, _file)| {
-                                test_path.extension() == Some(&self.parser_info.extension)
-                                    && test_path.parent()
-                                        == Some(&self.subdir_path(test_dir_path.as_path()))
-                            });
-                            for (path, _file) in files_of_extension {
-                                change_set.insert(TestReparse {
-                                    path: path.clone(),
-                                    pass: test_dir.pass,
+        for test in self.tests().iter().cloned() {
+            match test.kind.into_inner() {
+                nimbleparse_toml::TestKind::Dir(glob) => {
+                    let abs_glob_as_path = self.workspace_path.join(glob);
+                    let glob_str = abs_glob_as_path.to_str().unwrap();
+                    let paths = glob::glob(glob_str);
+                    if let Ok(paths) = paths {
+                        for test_dir_path in paths {
+                            if let Ok(test_dir_path) = test_dir_path {
+                                let files_of_extension = files.iter().filter(|(test_path, _file)| {
+                                    test_path.extension() == Some(&self.parser_info.extension)
+                                        && test_path.parent()
+                                            == Some(&self.subdir_path(test_dir_path.as_path()))
                                 });
+                                for (path, _file) in files_of_extension {
+                                    change_set.insert(TestReparse {
+                                        path: path.clone(),
+                                        pass: test.pass,
+                                    });
+                                }
                             }
                         }
                     }
+                },
+                nimbleparse_toml::TestKind::RonTests(_path) => {
+
                 }
             }
         }
@@ -375,7 +379,7 @@ impl ParseThread {
         }
     }
 
-    pub fn test_dirs(&self) -> &[nimbleparse_toml::TestDir] {
+    pub fn tests(&self) -> &[nimbleparse_toml::Test] {
         self.workspace_cfg.workspace.tests.as_slice()
     }
 
@@ -403,34 +407,38 @@ impl ParseThread {
                 std::collections::HashSet::new();
 
             // Read in all the test dir files...
-            for nimbleparse_toml::TestDir { kind, .. } in self.test_dirs() {
-                let nimbleparse_toml::TestKind::Dir(glob) = kind.clone().into_inner();
-                {
-                    let glob_path = self.workspace_path.join(glob);
-                    let glob_str = glob_path.to_str().unwrap();
-                    for dirs in glob::glob(glob_str) {
-                        for dir in dirs {
-                            if let Ok(dir) = dir {
-                                let dir_read = std::fs::read_dir(dir);
-                                if let Ok(dir_read) = dir_read {
-                                    dir_read.for_each(|file| {
-                                        if let Ok(file) = file {
-                                            let contents = std::fs::read_to_string(file.path());
-                                            if let Ok(contents) = contents {
-                                                let contents = rope::Rope::from(contents);
-                                                files.insert(
-                                                    file.path(),
-                                                    File {
-                                                        contents,
-                                                        version: None,
-                                                    },
-                                                );
+            for nimbleparse_toml::Test { kind, .. } in self.tests() {
+                match kind.clone().into_inner() {
+                    nimbleparse_toml::TestKind::Dir(glob) => {
+                        let glob_path = self.workspace_path.join(glob);
+                        let glob_str = glob_path.to_str().unwrap();
+                        for dirs in glob::glob(glob_str) {
+                            for dir in dirs {
+                                if let Ok(dir) = dir {
+                                    let dir_read = std::fs::read_dir(dir);
+                                    if let Ok(dir_read) = dir_read {
+                                        dir_read.for_each(|file| {
+                                            if let Ok(file) = file {
+                                                let contents = std::fs::read_to_string(file.path());
+                                                if let Ok(contents) = contents {
+                                                    let contents = rope::Rope::from(contents);
+                                                    files.insert(
+                                                        file.path(),
+                                                        File {
+                                                            contents,
+                                                            version: None,
+                                                        },
+                                                    );
+                                                }
                                             }
-                                        }
-                                    });
+                                        });
+                                    }
                                 }
                             }
                         }
+                    }
+                    nimbleparse_toml::TestKind::RonTests(_path) => {
+
                     }
                 }
             }
@@ -515,15 +523,18 @@ impl ParseThread {
                                     }
                                 } else {
                                     let parent = path.parent();
-                                    let test_dir = self.test_dirs().iter().find(|test_dir| {
-                                        let nimbleparse_toml::TestKind::Dir(glob) =
-                                            test_dir.kind.clone().into_inner();
-                                        {
-                                            let glob_path = self.workspace_path.join(glob);
-                                            let pattern =
-                                                glob::Pattern::new(glob_path.to_str().unwrap())
-                                                    .unwrap();
-                                            pattern.matches_path(parent.unwrap())
+                                    let test_dir = self.tests().iter().find(|test_dir| {
+                                        match test_dir.kind.clone().into_inner() {
+                                            nimbleparse_toml::TestKind::Dir(glob) => {
+                                                let glob_path = self.workspace_path.join(glob);
+                                                let pattern =
+                                                    glob::Pattern::new(glob_path.to_str().unwrap())
+                                                        .unwrap();
+                                                pattern.matches_path(parent.unwrap())
+                                            }
+                                            nimbleparse_toml::TestKind::RonTests(_path) => {
+                                                false
+                                            }
                                         }
                                     });
                                     if let Some(test_dir) = test_dir {
@@ -591,18 +602,21 @@ impl ParseThread {
                                         }
                                     } else {
                                         let parent = path.parent();
-                                        let test_dir = self.test_dirs().iter().find(|test_dir| {
-                                            let nimbleparse_toml::TestKind::Dir(glob) =
-                                                test_dir.kind.clone().into_inner();
-                                            {
-                                                let glob_path = self.workspace_path.join(glob);
-                                                let pattern =
-                                                    glob::Pattern::new(glob_path.to_str().unwrap())
-                                                        .unwrap();
-                                                pattern.matches_path(parent.unwrap())
+                                        let test = self.tests().iter().find(|test| {
+                                            match test.kind.clone().into_inner() {
+                                                nimbleparse_toml::TestKind::Dir(glob) => {
+                                                    let glob_path = self.workspace_path.join(glob);
+                                                    let pattern =
+                                                        glob::Pattern::new(glob_path.to_str().unwrap())
+                                                            .unwrap();
+                                                    pattern.matches_path(parent.unwrap())
+                                                }
+                                                nimbleparse_toml::TestKind::RonTests(_path) => {
+                                                    false
+                                                }
                                             }
                                         });
-                                        if let Some(test_dir) = test_dir {
+                                        if let Some(test_dir) = test {
                                             let change = TestReparse {
                                                 path: path.to_path_buf(),
                                                 pass: test_dir.pass,
