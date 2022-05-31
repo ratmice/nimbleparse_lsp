@@ -5,7 +5,7 @@ use std::path::PathBuf;
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Workspace {
     pub parsers: toml::Spanned<Vec<Parser>>,
-    pub tests: Vec<TestDir>,
+    pub tests: Vec<Test>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -35,13 +35,20 @@ fn default_recovery_kind() -> RecoveryKind {
 // are source generators, and files which contain a list of strings each to be parsed as
 // it's own file... So the reason TestKind is like this is for future expansion.
 // We should consider having a trait for it...
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq)]
 pub enum TestKind {
+    // path of glob e.g. "tests/pass/**"
     Dir(String),
+    Toml {
+        /// Should match a Parser.extension
+        parser_extension: String,
+        /// An extension to be interpreted as toml tests
+        toml_test_extension: String,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct TestDir {
+pub struct Test {
     pub kind: toml::Spanned<TestKind>,
     pub pass: bool,
 }

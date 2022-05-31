@@ -20,9 +20,13 @@ import { execFileSync } from 'child_process';
 let lspClient: LanguageClient;
 
 interface Parser { l_file: string, y_file: string, extension: string }
+
+interface TomlTest {Toml: {parser_extension: string, toml_test_extension: string}};
+interface DirTest {Dir: string};
+interface ParseTest {kind: TomlTest | DirTest, pass: boolean};
 interface TomlWorkspace {
     parsers: Parser[],
-    tests: {dir: string, pass: boolean}
+    tests: ParseTest[],
 };
 
 
@@ -46,6 +50,7 @@ export function activate(context: vscode.ExtensionContext) {
     const lsp_path_relative = path.resolve(path.join(context.extensionPath, "bin"), "nimbleparse_lsp");
     const lsp_path_relative_exe = path.resolve(path.join(context.extensionPath, "bin"), "nimbleparse_lsp.exe");
     // Try and find it relative to the extension, or fall back to the PATH.
+    const outputChannel = vscode.window.createOutputChannel("nimbleparse_lsp");
     const lsp_path = fs.existsSync(lsp_path_relative) ? lsp_path_relative : (fs.existsSync(lsp_path_relative_exe) ? lsp_path_relative_exe : "nimbleparse_lsp");
 
     // This doesn't quite work if we have a project `foo/`
@@ -71,6 +76,20 @@ export function activate(context: vscode.ExtensionContext) {
 	    return;
     }
 
+    var testDirs: string[] = [];
+    tomls?.forEach(
+        (toml) => {
+            toml.workspace.tests.forEach(
+                (test) => {
+                    let foo = test.kind as DirTest;
+                    if (foo.Dir != undefined) {
+                        testDirs.push(toml.folder + '/' + foo.Dir)
+                    }
+                }
+            )
+        }
+    );
+
     var dynSelector = tomls?.flatMap(
         (toml) => toml.workspace.parsers.flatMap(
             (parser: Parser) => ([{
@@ -84,7 +103,21 @@ export function activate(context: vscode.ExtensionContext) {
         )
     );
 
-    const outputChannel = vscode.window.createOutputChannel("nimbleparse_lsp");
+    testDirs.forEach(
+        (test_dir) => {
+            tomls?.forEach(
+                (toml) => toml.workspace.tests.forEach(
+                    (test) => {
+                        let foo = test.kind as TomlTest;
+                        if (foo.Toml != undefined) {
+                            dynSelector.push({pattern: test_dir + '/*' + foo.Toml.toml_test_extension })
+                        }
+                    }
+                )
+            )
+        }
+    );
+
     const lsp_exec: Executable = {
         command: lsp_path,
         args: ["--server"],
