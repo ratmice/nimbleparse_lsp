@@ -1,18 +1,12 @@
 xflags::xflags! {
     src "./src/flags.rs"
-
     cmd xtask {
-        default cmd help {
-            optional -h, --help
-        }
-
         cmd install {
             optional --client
             optional --server
             optional --console
             optional --debug
         }
-
         cmd clean {
         }
     }
@@ -27,14 +21,8 @@ pub struct Xtask {
 
 #[derive(Debug)]
 pub enum XtaskCmd {
-    Help(Help),
     Install(Install),
     Clean(Clean),
-}
-
-#[derive(Debug)]
-pub struct Help {
-    pub help: bool,
 }
 
 #[derive(Debug)]
@@ -49,8 +37,6 @@ pub struct Install {
 pub struct Clean;
 
 impl Xtask {
-    pub const HELP: &'static str = Self::HELP_;
-
     #[allow(dead_code)]
     pub fn from_env() -> xflags::Result<Self> {
         Self::from_env_()
