@@ -10,7 +10,14 @@
     "vscode": "^1.65.0"
   },
   "categories": [
+    "Programming Languages",
     "Other"
+  ],
+  "keywords": [
+    "lex",
+    "yacc",
+    "parsing",
+    "parser"
   ],
   "activationEvents": [
     "workspaceContains:**/nimbleparse.toml"
