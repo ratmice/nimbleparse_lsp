@@ -67,10 +67,6 @@ fn main() -> anyhow::Result<()> {
     let flags = flags::Xtask::from_env()?;
 
     match flags.subcommand {
-        flags::XtaskCmd::Help(_) => {
-            println!("{}", flags::Xtask::HELP);
-            Ok(())
-        }
         flags::XtaskCmd::Install(cmd) => cmd.run(sh),
         flags::XtaskCmd::Clean(cmd) => cmd.run(sh),
     }

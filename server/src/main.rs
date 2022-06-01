@@ -3,7 +3,6 @@ mod peek_channel;
 
 use cfgrammar::yacc;
 use parse_thread::{ParseThread, ParserMsg};
-use serde;
 use tower_lsp::jsonrpc;
 use tower_lsp::lsp_types as lsp;
 
@@ -32,7 +31,7 @@ enum ParseTableError {
     #[error("building parse tables: {0}")]
     LrTable(#[from] lrtable::StateTableError<u32>),
     #[error("yacc grammar error: {0}")]
-    CfGrammar(#[from] yacc::grammar::YaccGrammarError),
+    CfGrammar(#[from] yacc::YaccGrammarError),
 }
 
 #[derive(Debug)]
@@ -223,8 +222,7 @@ impl State {
     }
 
     fn parser_for(&self, path: &std::path::Path) -> Option<&ParserInfo> {
-        path.extension()
-            .map_or(None, |ext| self.extensions.get(ext))
+        path.extension().and_then(|ext| self.extensions.get(ext))
     }
 }
 
@@ -361,7 +359,7 @@ impl tower_lsp::LanguageServer for Backend {
             toml.extend(paths.map(|workspace_path| {
                 let toml_path = workspace_path.join("nimbleparse.toml");
                 // We should probably fix this, to not be sync when we implement reloading the toml file on change...
-                let toml_file = std::fs::read_to_string(&toml_path).unwrap();
+                let toml_file = std::fs::read_to_string(toml_path).unwrap();
                 let workspace: nimbleparse_toml::Workspace =
                     toml::de::from_slice(toml_file.as_bytes()).unwrap();
                 (
@@ -451,7 +449,7 @@ impl tower_lsp::LanguageServer for Backend {
         {
             let extensions = &mut state.extensions;
             let mut output_channels = Vec::new();
-            for (workspace_path, workspace_cfg) in (&state.toml).iter() {
+            for (workspace_path, workspace_cfg) in (state.toml).iter() {
                 let workspace = &workspace_cfg.workspace;
                 for (id, parser) in workspace.parsers.get_ref().iter().enumerate() {
                     let l_path = workspace_path.join(parser.l_file.get_ref());

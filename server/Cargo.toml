@@ -6,27 +6,28 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-log = "0.4.15"
-thiserror = "1.0.30"
-tokio = {version = "1.17.0", features=["fs", "macros", "rt-multi-thread", "io-std", "process"]}
-tower-lsp = "0.16.0"
+log = "0.4.17"
+thiserror = "1.0.38"
+# We shouldn't actually need net but for some reason must enable it to `enable_io()` on windows.
+tokio = { version = "1.24.2", features = ["fs", "macros", "rt-multi-thread", "io-std", "net", "process"] }
+tower-lsp = "0.18.0"
 nimbleparse_toml = {path = "../toml"}
-toml = {version = "0.5.8", features=["preserve_order"]}
-serde = "1.0.137"
+toml = { version = "0.5.10", features = ["preserve_order"] }
+serde = "1.0.152"
 serde-transcode = "1.1.1"
-serde_json = { version = "1.0.79", features=["preserve_order"]}
-cfgrammar = "0.12.0"
-lrpar = "0.12.0"
-lrlex = "0.12.0"
-lrtable = "0.12.0"
-num-traits = "0.2.14"
-tokio-stream = "0.1.8"
-ropey = "1.4.1"
+serde_json = { version = "1.0.91", features = ["preserve_order"] }
+cfgrammar = "0.13.0"
+lrpar = "0.13.0"
+lrlex = "0.13.0"
+lrtable = "0.13.0"
+num-traits = "0.2.15"
+tokio-stream = "0.1.11"
+ropey = "1.5.1"
 railroad = "0.1.1"
-glob = "0.3.0"
+glob = "0.3.1"
 
 [dependencies.console-subscriber]
-version = "0.1.4"
+version = "0.1.8"
 optional = true
 
 [features]

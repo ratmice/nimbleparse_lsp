@@ -28,6 +28,24 @@ l_file = "src/sr.l"
 y_file = "src/sr.y"
 extension = ".sr_conflict"
 
+[[parsers]]
+yacc_kind = {"Original" = "NoAction"}
+l_file = "src/whitespace.l"
+y_file = "src/ar.y"
+extension = ".ar_conflict"
+
+[[parsers]]
+yacc_kind = {"Original" = "NoAction"}
+l_file = "src/multi_error_lex.l"
+y_file = "src/multi_error_lex.y"
+extension = ".multi_error_lex"
+
+[[parsers]]
+yacc_kind = {"Original" = "NoAction"}
+l_file = "src/multi_error_yacc.l"
+y_file = "src/multi_error_yacc.y"
+extension = ".multi_error_yacc"
+
 [[tests]]
 kind = {"Dir" = "tests/**"}
 pass = true
