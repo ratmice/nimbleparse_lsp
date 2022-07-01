@@ -4,6 +4,7 @@ use super::{EditorMsg, ParserInfo, WorkspaceCfg};
 use cfgrammar::yacc::{self, YaccOriginalActionKind};
 use ropey as rope;
 use std::fmt;
+use tower_lsp::lsp_types::DiagnosticRelatedInformation;
 
 // traits
 use lrlex::LexerDef as _;
@@ -315,57 +316,51 @@ impl ParseThread {
                                     }
                                 }
                                 Err(e) => {
-                                    match &e {
-                                        lrtable::StateTableError { pidx: _pidx, .. } => {
-                                            lex_diags.push(lsp::Diagnostic {
-                                                severity: Some(lsp::DiagnosticSeverity::ERROR),
-                                                message: format!("{}", &e.to_string()),
-                                                ..Default::default()
-                                            });
-                                        }
-                                    }
+                                    lex_diags.push(lsp::Diagnostic {
+                                        severity: Some(lsp::DiagnosticSeverity::ERROR),
+                                        message: e.to_string(),
+                                        ..Default::default()
+                                    });
                                     let _ = stuff.take();
                                 }
                             }
                         }
-                        Err(e) => {
+                        Err(errs) => {
                             let _ = stuff.take();
-                            // Some of these still lack spans
-                            match &e {
-                                cfgrammar::yacc::YaccGrammarError::YaccParserError(
-                                    _parse_error,
-                                ) => {
-                                    yacc_diags.push(lsp::Diagnostic {
-                                        severity: Some(lsp::DiagnosticSeverity::ERROR),
-                                        message: format!("Validation error: {}", e.to_string()),
-                                        ..Default::default()
-                                    });
-                                }
-                                cfgrammar::yacc::YaccGrammarError::GrammarValidationError(
-                                    validation_error,
-                                ) => {
-                                    yacc_diags.push(lsp::Diagnostic {
-                                        severity: Some(lsp::DiagnosticSeverity::ERROR),
-                                        message: format!("{}", &e.to_string()),
-                                        ..Default::default()
-                                    });
 
-                                    match &validation_error.sym {
-                                        Some(cfgrammar::yacc::ast::Symbol::Token(_name, span))
-                                        | Some(cfgrammar::yacc::ast::Symbol::Rule(_name, span)) => {
-                                            yacc_diags.push(lsp::Diagnostic {
-                                                range: yacc_file.span_to_range(*span),
-                                                severity: Some(lsp::DiagnosticSeverity::ERROR),
-                                                message: format!(
-                                                    "Validation error: {}",
-                                                    &e.to_string()
-                                                ),
-                                                ..Default::default()
-                                            });
-                                        }
-                                        None => {}
-                                    }
-                                }
+                            for e in errs {
+                                use yacc::YaccGrammarErrorKind as K;
+
+                                yacc_diags.push(lsp::Diagnostic {
+                                    severity: Some(lsp::DiagnosticSeverity::ERROR),
+                                    message: e.to_string(),
+                                    range: yacc_file.span_to_range(e.span),
+                                    related_information: match &e.kind {
+                                        K::DuplicateRule(spans)
+                                        | K::DuplicatePrecedence(spans)
+                                        | K::DuplicateAvoidInsertDeclaration(spans)
+                                        | K::DuplicateImplicitTokensDeclaration(spans)
+                                        | K::DuplicateExpectDeclaration(spans)
+                                        | K::DuplicateActiontypeDeclaration(spans)
+                                        | K::DuplicateExpectRRDeclaration(spans)
+                                        | K::DuplicateStartDeclaration(spans)
+                                        | K::DuplicateEPP(spans) => Some(
+                                            spans
+                                                .iter()
+                                                .map(|span| DiagnosticRelatedInformation {
+                                                    message: "Also declared here".to_string(),
+                                                    location: lsp::Location {
+                                                        uri: yacc_url.clone(),
+                                                        range: yacc_file.span_to_range(*span),
+                                                    },
+                                                })
+                                                .collect::<Vec<_>>(),
+                                        ),
+
+                                        _ => None,
+                                    },
+                                    ..Default::default()
+                                });
                             }
                         }
                     }
@@ -377,13 +372,30 @@ impl ParseThread {
                         ))
                         .unwrap();
                 }
-                Err(e) => {
-                    // Can't currently do better than this because e hides location.
-                    lex_diags.push(lsp::Diagnostic {
-                        severity: Some(lsp::DiagnosticSeverity::ERROR),
-                        message: e.to_string(),
-                        ..Default::default()
-                    });
+                Err(errs) => {
+                    for e in errs {
+                        lex_diags.push(lsp::Diagnostic {
+                            severity: Some(lsp::DiagnosticSeverity::ERROR),
+                            message: e.to_string(),
+                            range: yacc_file.span_to_range(e.span),
+                            related_information: match e.kind {
+                                lrlex::LexErrorKind::DuplicateName(spans) => Some(
+                                    spans
+                                        .iter()
+                                        .map(|span| DiagnosticRelatedInformation {
+                                            message: "Also declared here".to_string(),
+                                            location: lsp::Location {
+                                                uri: yacc_url.clone(),
+                                                range: yacc_file.span_to_range(*span),
+                                            },
+                                        })
+                                        .collect::<Vec<_>>(),
+                                ),
+                                _ => None,
+                            },
+                            ..Default::default()
+                        });
+                    }
 
                     let _ = stuff.take();
                 }
@@ -402,7 +414,7 @@ impl ParseThread {
                 let glob_str = abs_glob_as_path.to_str().unwrap();
                 let paths = glob::glob(glob_str);
                 if let Ok(paths) = paths {
-                    for test_dir_path in paths {
+                    paths.for_each(|test_dir_path| {
                         if let Ok(test_dir_path) = test_dir_path {
                             let files_of_extension = files.iter().filter(|(test_path, _file)| {
                                 test_path.extension() == Some(&self.parser_info.extension)
@@ -416,7 +428,7 @@ impl ParseThread {
                                 });
                             }
                         }
-                    }
+                    });
                 }
             }
         }
@@ -491,7 +503,7 @@ impl ParseThread {
             self.output
                 .send(ParserMsg::Info(format!(
                     "diagnostics {} {} {:?}",
-                    url.clone(),
+                    url,
                     diags.len(),
                     file.version
                 )))
@@ -540,8 +552,8 @@ impl ParseThread {
                 {
                     let glob_path = self.workspace_path.join(glob);
                     let glob_str = glob_path.to_str().unwrap();
-                    for dirs in glob::glob(glob_str) {
-                        for dir in dirs {
+                    glob::glob(glob_str).into_iter().for_each(|dirs| {
+                        dirs.for_each(|dir| {
                             if let Ok(dir) = dir {
                                 let dir_read = std::fs::read_dir(dir);
                                 if let Ok(dir_read) = dir_read {
@@ -562,8 +574,8 @@ impl ParseThread {
                                     });
                                 }
                             }
-                        }
-                    }
+                        });
+                    });
                 }
             }
 
@@ -755,10 +767,10 @@ impl ParseThread {
                         M::StateGraph(channel, pretty_printer) => {
                             if let Some((_, grm, sgraph, _)) = &stuff {
                                 let states = match pretty_printer {
-                                    StateGraphPretty::CoreStates => sgraph.pp_core_states(&grm),
-                                    StateGraphPretty::ClosedStates => sgraph.pp_closed_states(&grm),
-                                    StateGraphPretty::CoreEdges => sgraph.pp(&grm, true),
-                                    StateGraphPretty::AllEdges => sgraph.pp(&grm, false),
+                                    StateGraphPretty::CoreStates => sgraph.pp_core_states(grm),
+                                    StateGraphPretty::ClosedStates => sgraph.pp_closed_states(grm),
+                                    StateGraphPretty::CoreEdges => sgraph.pp(grm, true),
+                                    StateGraphPretty::AllEdges => sgraph.pp(grm, false),
                                 };
                                 channel.send(Some(states)).unwrap();
                             } else {
@@ -769,18 +781,18 @@ impl ParseThread {
                             if let Some((_, grm, _, _)) = &stuff {
                                 let mut node_idxs = std::collections::HashMap::new();
                                 let mut sequences: Vec<railroad::Sequence> = Vec::new();
-                                for (foo, ridx) in grm.iter_rules().enumerate() {
+                                for (i, ridx) in grm.iter_rules().enumerate() {
                                     let name = grm.rule_name_str(ridx);
                                     let symbol = cfgrammar::Symbol::Rule(ridx);
-                                    node_idxs.insert(symbol, foo);
+                                    node_idxs.insert(symbol, i);
                                     sequences.push(railroad::Sequence::new(vec![Box::new(
                                         railroad::Comment::new(name.to_string()),
                                     )]));
                                 }
 
-                                for (foo, tidx) in grm.iter_tidxs().enumerate() {
+                                for (i, tidx) in grm.iter_tidxs().enumerate() {
                                     let symbol = cfgrammar::Symbol::Token(tidx);
-                                    node_idxs.insert(symbol, foo);
+                                    node_idxs.insert(symbol, i);
                                 }
 
                                 for ridx in grm.iter_rules() {
@@ -798,7 +810,7 @@ impl ParseThread {
                                     let mut choice = railroad::Choice::new(vec![]);
                                     for symbols in prod_syms {
                                         let mut a_seq = railroad::Sequence::new(vec![]);
-                                        if symbols.len() > 0 {
+                                        if symbols.is_empty() {
                                             for symbol in symbols {
                                                 match symbol {
                                                     cfgrammar::Symbol::Rule(prod_ridx)
@@ -883,7 +895,7 @@ impl ParseThread {
                                     let lexer = lexerdef.lexer(&input);
                                     let generic_tree_text = if let Some(pb) = &pb {
                                         let (tree, _) = pb.parse_generictree(&lexer);
-                                        tree.map_or(None, |tree| Some(tree.pp(&grm, &input)))
+                                        tree.map(|tree| tree.pp(grm, &input))
                                     } else {
                                         None
                                     };
@@ -936,7 +948,7 @@ impl ParseThread {
                                 self.output
                                     .send(ParserMsg::ProgressStep(token, message, pcnt as u32))
                                     .unwrap();
-                                change_set.remove(&reparse);
+                                change_set.remove(reparse);
                                 //std::thread::sleep(std::time::Duration::from_millis(500));
                             } else {
                                 self.output

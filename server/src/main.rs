@@ -3,7 +3,6 @@ mod peek_channel;
 
 use cfgrammar::yacc;
 use parse_thread::{ParseThread, ParserMsg};
-use serde;
 use tower_lsp::jsonrpc;
 use tower_lsp::lsp_types as lsp;
 
@@ -32,7 +31,7 @@ enum ParseTableError {
     #[error("building parse tables: {0}")]
     LrTable(#[from] lrtable::StateTableError<u32>),
     #[error("yacc grammar error: {0}")]
-    CfGrammar(#[from] yacc::grammar::YaccGrammarError),
+    CfGrammar(#[from] yacc::YaccGrammarError),
 }
 
 #[derive(Debug)]
@@ -223,8 +222,7 @@ impl State {
     }
 
     fn parser_for(&self, path: &std::path::Path) -> Option<&ParserInfo> {
-        path.extension()
-            .map_or(None, |ext| self.extensions.get(ext))
+        path.extension().and_then(|ext| self.extensions.get(ext))
     }
 }
 
