@@ -242,7 +242,7 @@ impl ParseThread {
         self.workspace_path.join(path)
     }
     fn updated_lex_or_yacc_file(
-        self: &mut ParseThread,
+        self: &ParseThread,
         change_set: &mut std::collections::HashSet<TestReparse>,
         files: &std::collections::HashMap<std::path::PathBuf, File>,
         stuff: &mut Option<(
