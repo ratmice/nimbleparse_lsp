@@ -74,7 +74,7 @@ when it needs to reload due to nimbleparse.toml changes.
 by default nvim doesn't show them though.
 
 6. [nvim-notify](https://github.com/rcarriga/nvim-notify/) :thumbsup:
-   Edit nimbleparse.lua
+   Add to init.vim
    ```
 	Plug 'rcarriga/nvim-notify/'
    ```
@@ -89,7 +89,6 @@ by default nvim doesn't show them though.
 		"info",
 	}
 
-	-- set the following key to the handlers key in nimbleparse_lspconfig above.
 	local handler_fns = {
 	        ["window/showMessage"] = function(err, method, params, client_id)
 		   vim.notify(method.message, severity[params.type])
