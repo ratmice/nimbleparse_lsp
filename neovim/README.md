@@ -74,10 +74,12 @@ when it needs to reload due to nimbleparse.toml changes.
 by default nvim doesn't show them though.
 
 6. [nvim-notify](https://github.com/rcarriga/nvim-notify/) :thumbsup:
+   Edit nimbleparse.lua
    ```
 	Plug 'rcarriga/nvim-notify/'
-
-	lua <<EOF
+   ```
+   Add the following to nimbleparse.lua and add the key `handlers = handler_fns` to the `default_config` table also in `nimbleparse.lua`
+   ```lua
 	require("notify").setup{}
 	vim.notify = require('notify')
 	local severity = {
@@ -88,16 +90,14 @@ by default nvim doesn't show them though.
 	}
 
 	-- set the following key to the handlers key in nimbleparse_lspconfig above.
-	local handlers = {
+	local handler_fns = {
 	        ["window/showMessage"] = function(err, method, params, client_id)
 		   vim.notify(method.message, severity[params.type])
 	        end,
 	  }
-	EOF
    ```
+
    It can also be configured to show [progress](https://github.com/rcarriga/nvim-notify/wiki/Usage-Recipes), but currently that appears to be fairly obtrusive when used with nimbleparse (although debounce_text_changes does not currently appear to be functioning at this time which should help).
-
-
 
 ## Testing
 
