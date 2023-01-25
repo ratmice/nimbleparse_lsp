@@ -76,6 +76,22 @@ struct File {
     output: tokio::sync::mpsc::UnboundedSender<ParserMsg>,
 }
 
+trait Coalesce {
+    fn coalesce(self, span: Option<Span>) -> Span;
+}
+impl Coalesce for Span {
+    // Returns self if span is None, the min of self.start() and other.start()
+    // and the max of self.end() and other.end()
+    fn coalesce(self, other: Option<Span>) -> Span {
+        if other.is_none() {
+            return self;
+        }
+
+        let other = other.unwrap();
+        Span::new(self.start().min(other.start()), self.end().max(other.end()))
+    }
+}
+
 impl File {
     fn span_to_location(&self, span: cfgrammar::Span) -> lsp::Location {
         lsp::Location {
@@ -104,42 +120,25 @@ impl File {
         }
     }
 
-    fn span_encompassing_ast_symbols(&self, symbols: &[ast::Symbol]) -> Option<Span> {
-        let mut start = None;
-        let mut end = None;
+    fn coalesce_ast_symbols_spans(&self, symbols: &[ast::Symbol]) -> Option<Span> {
+        let mut ret = None;
         for sym in symbols {
             match sym {
                 ast::Symbol::Rule(_, span) => {
-                    if start.is_none() {
-                        start = Some(span.start());
-                    }
-                    if end.is_none() {
-                        end = Some(span.end());
-                    }
-                    if span.start() < start.unwrap() {
-                        start = Some(span.start());
-                    }
-                    if span.end() > end.unwrap() {
-                        end = Some(span.end());
-                    }
+                    ret = Some(span.coalesce(ret));
                 }
                 ast::Symbol::Token(_, span) => {
-                    if start.is_none() {
-                        start = Some(span.start());
-                    }
-                    if end.is_none() {
-                        end = Some(span.end());
-                    }
-                    if span.start() < start.unwrap() {
-                        start = Some(span.start());
-                    }
-                    if span.end() > end.unwrap() {
-                        end = Some(span.end());
-                    }
+                    ret = Some(span.coalesce(ret));
                 }
             }
         }
-        None
+        #[cfg(feature = "debug_stuff")]
+        if let Some(span) = ret {
+            self.output
+                .send(ParserMsg::Info(format!("coalesced span: {}", ret)))
+                .unwrap();
+        }
+        ret
     }
 
     fn pidx_to_span<StorageT: 'static + num_traits::PrimInt + num_traits::Unsigned + fmt::Debug>(
@@ -155,12 +154,16 @@ impl File {
 
         if usize::from(pidx) < prods.len() {
             let prod = &prods[usize::from(pidx)];
-            let span = self.span_encompassing_ast_symbols(&prod.symbols);
+            let span = self.coalesce_ast_symbols_spans(&prod.symbols);
+            // This makes us give a diagnostic at a sequence of productions rather than a rule.
+            // This could probably use some looking over, as previously the coalesce function
+            // was returning None unconditionally
             if let Some(span) = span {
                 return CSpan::Primary(span);
             }
         }
 
+        // Fall back to a span for a Rule
         // We could also iterate through grm.prod(pidx)'s symbols to find a span, but that doesn't seem right.
         let rule = grm.prod_to_rule(pidx);
         let span = grm.rule_name_span(rule);
