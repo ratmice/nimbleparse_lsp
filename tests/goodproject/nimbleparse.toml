@@ -1,0 +1,42 @@
+[[parsers]]
+yacc_kind = "Grmtools"
+l_file = "src/lexer.l"
+y_file = "src/grmtools.y"
+extension = ".grmtools"
+recovery_kind = "None"
+
+[[parsers]]
+yacc_kind = { "Original" = "NoAction" }
+l_file = "src/lexer.l"
+y_file = "src/noactions.y"
+extension = ".noactions"
+recovery_kind = "None"
+
+[[parsers]]
+yacc_kind = { "Original" = "UserAction" }
+l_file = "src/lexer.l"
+y_file = "src/useractions.y"
+extension = ".useractions"
+recovery_kind = "None"
+
+[[parsers]]
+yacc_kind = { "Original" = "GenericParseTree" }
+l_file = "src/lexer.l"
+y_file = "src/generictree.y"
+extension = ".generictree"
+recovery_kind = "None"
+
+[[parsers]]
+yacc_kind = "Eco"
+l_file = "src/lexer.l"
+y_file = "src/eco.y"
+extension = ".eco"
+recovery_kind = "None"
+
+[[tests]]
+kind = {"Dir" = "tests/fail"}
+pass = false
+
+[[tests]]
+kind = {"Dir" = "tests/pass"}
+pass = true

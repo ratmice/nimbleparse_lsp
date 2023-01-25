@@ -606,14 +606,14 @@ impl ParseThread {
         //
         // This would also have large implications to pb ownership & reuse...
         // The thread would likely need to be started in `update_lex_or_yacc_file` after pb construction I guess.
-        let (_parse_tree, errors) = match self.parser_info.yacc_kind {
-            yacc::YaccKind::Original(YaccOriginalActionKind::NoAction) => {
-                (None, pb.parse_noaction(&lexer))
-            }
-            yacc::YaccKind::Original(YaccOriginalActionKind::GenericParseTree) => {
-                pb.parse_generictree(&lexer)
-            }
-            _ => (None, vec![]),
+        let errors = match self.parser_info.yacc_kind {
+            // Here even though it says `GenericParseTree` we run with no_action.
+            // There is a specific command for producing a generic parse tree
+            yacc::YaccKind::Original(YaccOriginalActionKind::NoAction)
+            | yacc::YaccKind::Original(YaccOriginalActionKind::GenericParseTree)
+            | yacc::YaccKind::Original(YaccOriginalActionKind::UserAction)
+            | yacc::YaccKind::Grmtools
+            | yacc::YaccKind::Eco => pb.parse_noaction(&lexer),
         };
 
         if errors.is_empty() && !should_pass {
