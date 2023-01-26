@@ -7,7 +7,7 @@ use cfgrammar::{
     PIdx, Span, Spanned,
 };
 use ropey as rope;
-use std::fmt;
+use std::{fmt, path::Path};
 use tower_lsp::lsp_types::DiagnosticRelatedInformation;
 
 use lrpar::LexError;
@@ -241,7 +241,10 @@ pub struct ParseThread {
 }
 
 impl ParseThread {
-    fn subdir_path(&self, path: &std::path::Path) -> std::path::PathBuf {
+    fn subdir_path<P>(&self, path: P) -> std::path::PathBuf
+    where
+        P: AsRef<Path>,
+    {
         self.workspace_path.join(path)
     }
     fn updated_lex_or_yacc_file(
@@ -256,8 +259,8 @@ impl ParseThread {
         )>,
     ) {
         if let (Some(lex_file), Some(yacc_file)) = (
-            files.get(self.parser_info.l_path.as_path()),
-            files.get(self.parser_info.y_path.as_path()),
+            files.get(&self.parser_info.l_path),
+            files.get(&self.parser_info.y_path),
         ) {
             self.output
                 .send(ParserMsg::Info(format!(
@@ -568,8 +571,7 @@ impl ParseThread {
                         if let Ok(test_dir_path) = test_dir_path {
                             let files_of_extension = files.iter().filter(|(test_path, _file)| {
                                 test_path.extension() == Some(&self.parser_info.extension)
-                                    && test_path.parent()
-                                        == Some(&self.subdir_path(test_dir_path.as_path()))
+                                    && test_path.parent() == Some(&self.subdir_path(&test_dir_path))
                             });
                             for (path, _file) in files_of_extension {
                                 change_set.insert(TestReparse {
@@ -733,8 +735,8 @@ impl ParseThread {
             }
 
             // Read lex/yacc files.
-            let l_contents = std::fs::read_to_string(self.parser_info.l_path.as_path());
-            let y_contents = std::fs::read_to_string(self.parser_info.y_path.as_path());
+            let l_contents = std::fs::read_to_string(&self.parser_info.l_path);
+            let y_contents = std::fs::read_to_string(&self.parser_info.y_path);
             let mut pb: Option<lrpar::RTParserBuilder<u32, lrlex::DefaultLexerTypes>> = None;
             let mut stuff: Option<(
                 LexTable,
@@ -809,8 +811,8 @@ impl ParseThread {
                                         version: Some(params.text_document.version),
                                     },
                                 );
-                                if self.parser_info.l_path == path
-                                    || self.parser_info.y_path == path
+                                if self.parser_info.is_lexer(&path)
+                                    || self.parser_info.is_parser(&path)
                                 {
                                     pb = None;
                                     self.updated_lex_or_yacc_file(
@@ -888,8 +890,8 @@ impl ParseThread {
                                         }
                                     }
 
-                                    if self.parser_info.l_path == path
-                                        || self.parser_info.y_path == path
+                                    if self.parser_info.is_lexer(&path)
+                                        || self.parser_info.is_parser(&path)
                                     {
                                         pb = None;
                                         self.updated_lex_or_yacc_file(

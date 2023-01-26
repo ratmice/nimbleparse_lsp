@@ -10,6 +10,8 @@ use tower_lsp::lsp_types as lsp;
 use std::ops::DerefMut as _;
 use tokio_stream::StreamExt as _;
 
+use std::path::Path;
+
 #[derive(thiserror::Error, Debug)]
 enum ServerError {
     #[error("argument requires a path")]
@@ -62,6 +64,12 @@ pub struct ParserInfo {
 }
 
 impl ParserInfo {
+    fn is_lexer(&self, path: &Path) -> bool {
+        self.l_path == path
+    }
+    fn is_parser(&self, path: &Path) -> bool {
+        self.y_path == path
+    }
     fn id(&self) -> ParserId {
         self.id
     }
