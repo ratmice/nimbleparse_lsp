@@ -104,10 +104,10 @@ impl<T: fmt::Display> fmt::Display for CommaSep<T> {
     fn fmt(&self, formatter: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         let mut iter = self.stuff.iter();
         if let Some(item) = iter.next() {
-            formatter.write_fmt(format_args!("'{}'", item))?;
+            formatter.write_fmt(format_args!("'{item}'"))?;
         }
         for item in iter {
-            formatter.write_fmt(format_args!(", '{}'", item))?;
+            formatter.write_fmt(format_args!(", '{item}'"))?;
         }
         Ok(())
     }
@@ -550,7 +550,7 @@ impl ParseThread {
                                                         lex_diags.push(lsp::Diagnostic {
                                                             range: lex_file.span_to_range(rule.name_span),
                                                             severity: Some(lsp::DiagnosticSeverity::WARNING),
-                                                            message: format!("token '{}' is defined in the lexer but not referenced in the grammar.", token),
+                                                            message: format!("token '{token}' is defined in the lexer but not referenced in the grammar."),
                                                             ..Default::default()
                                                         });
                                                     }
@@ -571,7 +571,7 @@ impl ParseThread {
                                                         yacc_diags.push(lsp::Diagnostic {
                                                             range: yacc_file.span_to_range(span),
                                                             severity: Some(lsp::DiagnosticSeverity::ERROR),
-                                                            message: format!("the token '{}' is referenced in the grammar but not defined in the lexer.", token),
+                                                            message: format!("the token '{token}' is referenced in the grammar but not defined in the lexer."),
                                                             ..Default::default()
                                                         });
                                                     }
@@ -943,8 +943,7 @@ impl ParseThread {
                                         if let Some(range) = change.range {
                                             self.output
                                                 .send(ParserMsg::Info(format!(
-                                                    "did change: {:?} {:?}",
-                                                    path, range
+                                                    "did change: {path:?} {range:?}"
                                                 )))
                                                 .unwrap();
                                             let start_line_charidx =
@@ -1167,8 +1166,7 @@ impl ParseThread {
                         let n = change_set.len();
                         self.output
                             .send(ParserMsg::Info(format!(
-                                "Evaluating changes {:?}",
-                                change_set
+                                "Evaluating changes {change_set:?}"
                             )))
                             .unwrap();
 
