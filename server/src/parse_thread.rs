@@ -141,6 +141,65 @@ struct File {
     output: tokio::sync::mpsc::UnboundedSender<ParserMsg>,
 }
 
+struct ParserData(
+    Option<(
+        LexerDef,
+        yacc::YaccGrammar,
+        lrtable::StateGraph<u32>,
+        lrtable::StateTable<u32>,
+    )>,
+);
+
+impl ParserData {
+    fn new() -> Self {
+        ParserData(None)
+    }
+    fn clear(&mut self) {
+        self.0 = None
+    }
+
+    fn replace(
+        &mut self,
+        lexerdef: LexerDef,
+        grm: yacc::YaccGrammar,
+        state_graph: lrtable::StateGraph<u32>,
+        state_table: lrtable::StateTable<u32>,
+    ) {
+        self.0.replace((lexerdef, grm, state_graph, state_table));
+    }
+
+    fn lexerdef(&self) -> Option<&LexerDef> {
+        if let Some(x) = self.0.as_ref() {
+            Some(&x.0)
+        } else {
+            None
+        }
+    }
+    fn grammar(&self) -> Option<&yacc::YaccGrammar> {
+        if let Some(x) = self.0.as_ref() {
+            Some(&x.1)
+        } else {
+            None
+        }
+    }
+
+    fn state_graph(&self) -> Option<&lrtable::StateGraph<u32>> {
+        if let Some(x) = self.0.as_ref() {
+            Some(&x.2)
+        } else {
+            None
+        }
+    }
+
+    fn state_table(&self) -> Option<&lrtable::StateTable<u32>> {
+        if let Some(x) = self.0.as_ref() {
+            Some(&x.3)
+        } else {
+            None
+        }
+    }
+}
+
 trait Coalesce {
     fn coalesce(self, span: Option<Span>) -> Span;
 }
@@ -316,12 +375,7 @@ impl ParseThread {
         self: &ParseThread,
         change_set: &mut ChangeSet,
         files: &Files,
-        stuff: &mut Option<(
-            LexerDef,
-            yacc::YaccGrammar,
-            lrtable::StateGraph<u32>,
-            lrtable::StateTable<u32>,
-        )>,
+        parser_data: &mut ParserData,
     ) {
         if let (Some(lex_file), Some(yacc_file)) = (
             files.get_file(&self.parser_info.l_path),
@@ -527,9 +581,9 @@ impl ParseThread {
                                     }
 
                                     if conflicts {
-                                        let _ = stuff.take();
+                                        parser_data.clear();
                                     } else {
-                                        stuff.replace((lexerdef, grm, sgraph, stable));
+                                        parser_data.replace(lexerdef, grm, sgraph, stable);
                                     }
                                 }
                                 Err(e) => {
@@ -547,12 +601,12 @@ impl ParseThread {
                                         }
                                     }
 
-                                    let _ = stuff.take();
+                                    parser_data.clear();
                                 }
                             }
                         }
                         Err(errs) => {
-                            let _ = stuff.take();
+                            parser_data.clear();
 
                             for e in errs {
                                 use yacc::parser::SpansKind as K;
@@ -617,7 +671,7 @@ impl ParseThread {
                         });
                     }
 
-                    let _ = stuff.take();
+                    parser_data.clear();
                 }
             }
             self.output
@@ -760,6 +814,7 @@ impl ParseThread {
     // It certainly can be improved though.
     pub fn init(mut self: ParseThread) -> impl FnOnce() {
         move || {
+            let mut parser_data = ParserData::new();
             let mut files = Files::new();
             let mut change_set = std::collections::HashSet::new();
 
@@ -778,7 +833,6 @@ impl ParseThread {
             let l_contents = std::fs::read_to_string(&self.parser_info.l_path);
             let y_contents = std::fs::read_to_string(&self.parser_info.y_path);
             let mut pb: Option<lrpar::RTParserBuilder<u32, lrlex::DefaultLexerTypes>> = None;
-            let mut stuff = None;
 
             if let (Ok(l_contents), Ok(y_contents)) = (&l_contents, &y_contents) {
                 let mut contents = rope::RopeBuilder::new();
@@ -800,8 +854,10 @@ impl ParseThread {
                     version: None,
                 });
                 // Build the parser for the filesystem files.
-                self.updated_lex_or_yacc_file(&mut change_set, &files, &mut stuff);
-                if let Some((_, grm, _, stable)) = &stuff {
+                self.updated_lex_or_yacc_file(&mut change_set, &files, &mut parser_data);
+                if let (Some(grm), Some(stable)) =
+                    (parser_data.grammar(), parser_data.state_table())
+                {
                     pb.replace(
                         lrpar::RTParserBuilder::new(grm, stable)
                             .recoverer(self.parser_info.recovery_kind),
@@ -839,9 +895,11 @@ impl ParseThread {
                                     self.updated_lex_or_yacc_file(
                                         &mut change_set,
                                         &files,
-                                        &mut stuff,
+                                        &mut parser_data,
                                     );
-                                    if let Some((_, grm, _, stable)) = &stuff {
+                                    if let (Some(grm), Some(stable)) =
+                                        (parser_data.grammar(), parser_data.state_table())
+                                    {
                                         pb.replace(
                                             lrpar::RTParserBuilder::new(grm, stable)
                                                 .recoverer(self.parser_info.recovery_kind),
@@ -912,9 +970,11 @@ impl ParseThread {
                                         self.updated_lex_or_yacc_file(
                                             &mut change_set,
                                             &files,
-                                            &mut stuff,
+                                            &mut parser_data,
                                         );
-                                        if let Some((_, grm, _, stable)) = &stuff {
+                                        if let (Some(grm), Some(stable)) =
+                                            (parser_data.grammar(), parser_data.state_table())
+                                        {
                                             pb.replace(
                                                 lrpar::RTParserBuilder::new(grm, stable)
                                                     .recoverer(self.parser_info.recovery_kind),
@@ -952,7 +1012,9 @@ impl ParseThread {
                             }
                         }
                         M::StateGraph(channel, pretty_printer) => {
-                            if let Some((_, grm, sgraph, _)) = &stuff {
+                            if let (Some(grm), Some(sgraph)) =
+                                (parser_data.grammar(), parser_data.state_graph())
+                            {
                                 let states = match pretty_printer {
                                     StateGraphPretty::CoreStates => sgraph.pp_core_states(grm),
                                     StateGraphPretty::ClosedStates => sgraph.pp_closed_states(grm),
@@ -965,7 +1027,7 @@ impl ParseThread {
                             }
                         }
                         M::Railroad(channel) => {
-                            if let Some((_, grm, _, _)) = &stuff {
+                            if let Some(grm) = parser_data.grammar() {
                                 let mut node_idxs = std::collections::HashMap::new();
                                 let mut sequences: Vec<railroad::Sequence> = Vec::new();
                                 for (i, ridx) in grm.iter_rules().enumerate() {
@@ -1076,7 +1138,9 @@ impl ParseThread {
                         }
 
                         M::GenericTree(channel, file_path) => {
-                            if let Some((lexerdef, grm, _, _)) = &stuff {
+                            if let (Some(lexerdef), Some(grm)) =
+                                (parser_data.lexerdef(), parser_data.grammar())
+                            {
                                 if let Some(file) = files.get_file(&file_path) {
                                     let input = file.contents.to_string();
                                     let lexer = lexerdef.lexer(&input);
@@ -1097,7 +1161,7 @@ impl ParseThread {
                     }
                 }
                 // Parse everything in the change_set.
-                if let Some((lexerdef, _, _, _)) = &stuff {
+                if let Some(lexerdef) = parser_data.lexerdef() {
                     if let Some(pb) = &pb {
                         let token = LSP_TOKEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         let n = change_set.len();
