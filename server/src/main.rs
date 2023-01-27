@@ -98,7 +98,7 @@ async fn process_parser_messages(
             match msg {
                 ParserMsg::Info(msg) => {
                     client
-                        .log_message(lsp::MessageType::INFO, format!("{:?}", msg))
+                        .log_message(lsp::MessageType::INFO, format!("{msg:?}"))
                         .await;
                 }
                 ParserMsg::Diagnostics(url, diags, version) => {
@@ -253,7 +253,7 @@ pub enum EditorMsg {
 fn initialize_failed(reason: String) -> jsonrpc::Result<lsp::InitializeResult> {
     Err(tower_lsp::jsonrpc::Error {
         code: tower_lsp::jsonrpc::ErrorCode::ServerError(-32002),
-        message: format!("Error during server initialization: {}", reason),
+        message: format!("Error during server initialization: {reason}"),
         data: None,
     })
 }
@@ -495,11 +495,11 @@ impl tower_lsp::LanguageServer for Backend {
                     }));
                 }
             }
-            let _ = tokio::task::spawn(process_parser_messages(
+            drop(tokio::task::spawn(process_parser_messages(
                 self.client.clone(),
                 output_channels,
                 state.shutdown.subscribe(),
-            ));
+            )));
         }
 
         self.client
@@ -579,7 +579,7 @@ impl tower_lsp::LanguageServer for Backend {
                         self.client
                             .log_message(
                                 lsp::MessageType::ERROR,
-                                format!("Internal error: no channel for parser: {:?}", parser_info),
+                                format!("Internal error: no channel for parser: {parser_info:?}"),
                             )
                             .await;
                     }
@@ -589,7 +589,7 @@ impl tower_lsp::LanguageServer for Backend {
                 self.client
                     .log_message(
                         lsp::MessageType::LOG,
-                        format!("error: converting url to path: {}", url),
+                        format!("error: converting url to path: {url}"),
                     )
                     .await;
             }
@@ -623,10 +623,7 @@ impl tower_lsp::LanguageServer for Backend {
                     if let Some(channel) = channel {
                         if let Err(e) = channel.send(EditorMsg::DidOpen(params.clone())) {
                             self.client
-                                .log_message(
-                                    lsp::MessageType::LOG,
-                                    format!("did_open error: {}", e),
-                                )
+                                .log_message(lsp::MessageType::LOG, format!("did_open error: {e}"))
                                 .await;
                         }
                     }
@@ -634,7 +631,7 @@ impl tower_lsp::LanguageServer for Backend {
             }
             Err(e) => {
                 self.client
-                    .log_message(lsp::MessageType::LOG, format!("did_open error: {:?}", e))
+                    .log_message(lsp::MessageType::LOG, format!("did_open error: {e:?}"))
                     .await;
             }
         }
@@ -649,7 +646,7 @@ impl tower_lsp::LanguageServer for Backend {
         #[allow(unused_mut, unused_variables)]
         let mut state = self.state.lock().await;
         self.client
-            .log_message(lsp::MessageType::LOG, format!("did_close {}", url))
+            .log_message(lsp::MessageType::LOG, format!("did_close {url}"))
             .await;
     }
 
