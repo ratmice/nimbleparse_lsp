@@ -365,6 +365,46 @@ pub struct ParseThread {
 }
 
 impl ParseThread {
+    fn read_tests(&self, files: &mut Files) {
+        // Read in all the test dir files...
+        for nimbleparse_toml::TestDir { kind, .. } in self.test_dirs() {
+            let nimbleparse_toml::TestKind::Dir(glob) = kind.clone().into_inner();
+            {
+                let glob_path = self.workspace_path.join(glob);
+                let glob_str = glob_path.to_str().unwrap();
+                if let Ok(paths) = glob::glob(glob_str) {
+                    files.read_dirs(paths);
+                }
+            }
+        }
+    }
+
+    fn read_lex_yacc_files(&self, files: &mut Files) {
+        // Read lex/yacc files.
+        let l_contents = std::fs::read_to_string(&self.parser_info.l_path);
+        let y_contents = std::fs::read_to_string(&self.parser_info.y_path);
+        if let (Ok(l_contents), Ok(y_contents)) = (&l_contents, &y_contents) {
+            let mut contents = rope::RopeBuilder::new();
+            contents.append(l_contents);
+            files.insert(File {
+                #[cfg(feature = "debug_stuff")]
+                output: self.output.clone(),
+                path: self.parser_info.l_path.clone(),
+                contents: contents.finish(),
+                version: None,
+            });
+            let mut contents = rope::RopeBuilder::new();
+            contents.append(y_contents);
+            files.insert(File {
+                #[cfg(feature = "debug_stuff")]
+                output: self.output.clone(),
+                path: self.parser_info.y_path.clone(),
+                contents: contents.finish(),
+                version: None,
+            });
+        }
+    }
+
     fn subdir_path<P>(&self, path: P) -> std::path::PathBuf
     where
         P: AsRef<Path>,
@@ -818,51 +858,16 @@ impl ParseThread {
             let mut files = Files::new();
             let mut change_set = std::collections::HashSet::new();
 
-            // Read in all the test dir files...
-            for nimbleparse_toml::TestDir { kind, .. } in self.test_dirs() {
-                let nimbleparse_toml::TestKind::Dir(glob) = kind.clone().into_inner();
-                {
-                    let glob_path = self.workspace_path.join(glob);
-                    let glob_str = glob_path.to_str().unwrap();
-                    if let Ok(paths) = glob::glob(glob_str) {
-                        files.read_dirs(paths);
-                    }
-                }
-            }
-            // Read lex/yacc files.
-            let l_contents = std::fs::read_to_string(&self.parser_info.l_path);
-            let y_contents = std::fs::read_to_string(&self.parser_info.y_path);
+            self.read_tests(&mut files);
             let mut pb: Option<lrpar::RTParserBuilder<u32, lrlex::DefaultLexerTypes>> = None;
 
-            if let (Ok(l_contents), Ok(y_contents)) = (&l_contents, &y_contents) {
-                let mut contents = rope::RopeBuilder::new();
-                contents.append(l_contents);
-                files.insert(File {
-                    #[cfg(feature = "debug_stuff")]
-                    output: self.output.clone(),
-                    path: self.parser_info.l_path.clone(),
-                    contents: contents.finish(),
-                    version: None,
-                });
-                let mut contents = rope::RopeBuilder::new();
-                contents.append(y_contents);
-                files.insert(File {
-                    #[cfg(feature = "debug_stuff")]
-                    output: self.output.clone(),
-                    path: self.parser_info.y_path.clone(),
-                    contents: contents.finish(),
-                    version: None,
-                });
-                // Build the parser for the filesystem files.
-                self.updated_lex_or_yacc_file(&mut change_set, &files, &mut parser_data);
-                if let (Some(grm), Some(stable)) =
-                    (parser_data.grammar(), parser_data.state_table())
-                {
-                    pb.replace(
-                        lrpar::RTParserBuilder::new(grm, stable)
-                            .recoverer(self.parser_info.recovery_kind),
-                    );
-                }
+            self.read_lex_yacc_files(&mut files);
+            self.updated_lex_or_yacc_file(&mut change_set, &files, &mut parser_data);
+            if let (Some(grm), Some(stable)) = (parser_data.grammar(), parser_data.state_table()) {
+                pb.replace(
+                    lrpar::RTParserBuilder::new(grm, stable)
+                        .recoverer(self.parser_info.recovery_kind),
+                );
             }
             let mut block = false;
 
