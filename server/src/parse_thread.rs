@@ -889,7 +889,7 @@ impl ParseThread {
                                 files.insert(File {
                                     #[cfg(feature = "debug_stuff")]
                                     output: self.output.clone(),
-                                    path: params.text_document.uri.to_file_path().clone().unwrap(),
+                                    path: path.clone(),
                                     contents: rope::Rope::from(params.text_document.text),
                                     version: Some(params.text_document.version),
                                 });
