@@ -430,7 +430,7 @@ impl ParseThread {
     {
         self.workspace_path.join(path)
     }
-    fn updated_lex_or_yacc_file(
+    fn changed_parser(
         self: &ParseThread,
         change_set: &mut ChangeSet,
         files: &Files,
@@ -1051,7 +1051,7 @@ impl ParseThread {
             let mut pb: Option<lrpar::RTParserBuilder<u32, lrlex::DefaultLexerTypes>> = None;
 
             self.read_lex_yacc_files(&mut files);
-            self.updated_lex_or_yacc_file(&mut change_set, &files, &mut parser_data);
+            self.changed_parser(&mut change_set, &files, &mut parser_data);
             self.rebuild_parser_builder(&parser_data, &mut pb);
 
             let mut block = false;
@@ -1083,11 +1083,7 @@ impl ParseThread {
                                     || self.parser_info.is_parser(&path)
                                 {
                                     pb = None;
-                                    self.updated_lex_or_yacc_file(
-                                        &mut change_set,
-                                        &files,
-                                        &mut parser_data,
-                                    );
+                                    self.changed_parser(&mut change_set, &files, &mut parser_data);
                                     self.rebuild_parser_builder(&parser_data, &mut pb);
                                 } else {
                                     self.needs_reparsing(path, &mut change_set);
@@ -1098,35 +1094,25 @@ impl ParseThread {
                                 .unwrap();
                         }
                         M::DidChange(params) => {
-                            let url = params.text_document.uri;
-                            let path = url.to_file_path();
+                            if let Ok(path) = params.text_document.uri.to_file_path() {
+                                let file = files.get_or_initialize(path.clone());
+                                self.apply_changed_text(file, &params.content_changes);
 
-                            match path {
-                                Ok(path) => {
-                                    let file = files.get_or_initialize(path.clone());
-                                    self.apply_changed_text(file, &params.content_changes);
-
-                                    if self.parser_info.is_lexer(&path)
-                                        || self.parser_info.is_parser(&path)
-                                    {
-                                        pb = None;
-                                        self.updated_lex_or_yacc_file(
-                                            &mut change_set,
-                                            &files,
-                                            &mut parser_data,
-                                        );
-                                        self.rebuild_parser_builder(&parser_data, &mut pb);
-                                    } else {
-                                        self.needs_reparsing(path, &mut change_set);
-                                    }
+                                if self.parser_info.is_lexer(&path)
+                                    || self.parser_info.is_parser(&path)
+                                {
+                                    pb = None;
+                                    self.changed_parser(&mut change_set, &files, &mut parser_data);
+                                    self.rebuild_parser_builder(&parser_data, &mut pb);
+                                } else {
+                                    self.needs_reparsing(path, &mut change_set);
                                 }
-                                Err(()) => {
-                                    self.output
-                                        .send(ParserMsg::Info(
-                                            "Error converting url to path".to_string(),
-                                        ))
-                                        .unwrap();
-                                }
+                            } else {
+                                self.output
+                                    .send(ParserMsg::Info(
+                                        "Error converting url to path".to_string(),
+                                    ))
+                                    .unwrap();
                             }
                         }
                         M::StateGraph(channel, pretty_printer) => {
