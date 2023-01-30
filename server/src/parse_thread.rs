@@ -6,6 +6,7 @@ use cfgrammar::{
     yacc::{self, ast, YaccOriginalActionKind},
     PIdx, Span, Spanned,
 };
+use lrlex::DefaultLexerTypes;
 use ropey as rope;
 use std::{fmt, path::Path};
 use tower_lsp::lsp_types::DiagnosticRelatedInformation;
@@ -836,6 +837,18 @@ impl ParseThread {
         self.workspace_cfg.workspace.tests.as_slice()
     }
 
+    fn rebuild_parser_builder<'a>(
+        &self,
+        parser_data: &'a ParserData,
+        parser_builder: &mut Option<lrpar::RTParserBuilder<'a, u32, DefaultLexerTypes>>,
+    ) {
+        if let (Some(grm), Some(stable)) = (parser_data.grammar(), parser_data.state_table()) {
+            parser_builder.replace(
+                lrpar::RTParserBuilder::new(grm, stable).recoverer(self.parser_info.recovery_kind),
+            );
+        }
+    }
+
     // Given a `ParseThread` returns a function which performs a loop
     // receiving incremental file updates from lsp, generates
     // a RTParserBuilder, and then parses files.
@@ -863,12 +876,8 @@ impl ParseThread {
 
             self.read_lex_yacc_files(&mut files);
             self.updated_lex_or_yacc_file(&mut change_set, &files, &mut parser_data);
-            if let (Some(grm), Some(stable)) = (parser_data.grammar(), parser_data.state_table()) {
-                pb.replace(
-                    lrpar::RTParserBuilder::new(grm, stable)
-                        .recoverer(self.parser_info.recovery_kind),
-                );
-            }
+            self.rebuild_parser_builder(&parser_data, &mut pb);
+
             let mut block = false;
 
             // Start listening for events from the editor.
@@ -902,14 +911,7 @@ impl ParseThread {
                                         &files,
                                         &mut parser_data,
                                     );
-                                    if let (Some(grm), Some(stable)) =
-                                        (parser_data.grammar(), parser_data.state_table())
-                                    {
-                                        pb.replace(
-                                            lrpar::RTParserBuilder::new(grm, stable)
-                                                .recoverer(self.parser_info.recovery_kind),
-                                        );
-                                    }
+                                    self.rebuild_parser_builder(&parser_data, &mut pb);
                                 } else {
                                     let parent = path.parent();
                                     let test_dir = self.test_dirs().iter().find(|test_dir| {
@@ -976,14 +978,7 @@ impl ParseThread {
                                             &files,
                                             &mut parser_data,
                                         );
-                                        if let (Some(grm), Some(stable)) =
-                                            (parser_data.grammar(), parser_data.state_table())
-                                        {
-                                            pb.replace(
-                                                lrpar::RTParserBuilder::new(grm, stable)
-                                                    .recoverer(self.parser_info.recovery_kind),
-                                            );
-                                        }
+                                        self.rebuild_parser_builder(&parser_data, &mut pb);
                                     } else {
                                         let parent = path.parent();
                                         let test_dir = self.test_dirs().iter().find(|test_dir| {
