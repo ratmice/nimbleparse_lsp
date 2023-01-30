@@ -73,13 +73,13 @@ impl Files {
         })
     }
 
-    fn files_for_extension(
-        &self,
-        extension: std::ffi::OsString,
+    fn files_for_extension<'a>(
+        &'a self,
+        extension: &'a std::ffi::OsString,
         path: std::path::PathBuf,
-    ) -> impl Iterator<Item = (&std::path::PathBuf, &File)> + '_ {
+    ) -> impl Iterator<Item = (&std::path::PathBuf, &File)> {
         self.files.iter().filter(move |(test_path, _file)| {
-            test_path.extension() == Some(&extension) && test_path.parent() == Some(&path)
+            test_path.extension() == Some(extension) && test_path.parent() == Some(&path)
         })
     }
 
@@ -366,6 +366,24 @@ pub struct ParseThread {
 }
 
 impl ParseThread {
+    fn needs_reparsing(&self, path: std::path::PathBuf, change_set: &mut ChangeSet) {
+        let parent = path.parent();
+        let test_dir = self.test_dirs().iter().find(|test_dir| {
+            let nimbleparse_toml::TestKind::Dir(glob) = test_dir.kind.clone().into_inner();
+            {
+                let glob_path = self.workspace_path.join(glob);
+                let pattern = glob::Pattern::new(glob_path.to_str().unwrap()).unwrap();
+                pattern.matches_path(parent.unwrap())
+            }
+        });
+        if let Some(test_dir) = test_dir {
+            let change = TestReparse {
+                path,
+                pass: test_dir.pass,
+            };
+            change_set.insert(change);
+        }
+    }
     fn read_tests(&self, files: &mut Files) {
         // Read in all the test dir files...
         for nimbleparse_toml::TestDir { kind, .. } in self.test_dirs() {
@@ -722,6 +740,10 @@ impl ParseThread {
 
         change_set.clear();
 
+        self.reparse_all_applicable_tests(files, change_set);
+    }
+
+    fn reparse_all_applicable_tests(&self, files: &Files, change_set: &mut ChangeSet) {
         for test_dir in self.test_dirs() {
             let nimbleparse_toml::TestKind::Dir(glob) = test_dir.kind.clone().into_inner();
             {
@@ -732,7 +754,7 @@ impl ParseThread {
                     paths.for_each(|test_dir_path| {
                         if let Ok(test_dir_path) = test_dir_path {
                             let files_of_extension = files.files_for_extension(
-                                self.parser_info.extension.clone(),
+                                &self.parser_info.extension,
                                 self.subdir_path(test_dir_path),
                             );
                             for (path, _file) in files_of_extension {
@@ -913,25 +935,7 @@ impl ParseThread {
                                     );
                                     self.rebuild_parser_builder(&parser_data, &mut pb);
                                 } else {
-                                    let parent = path.parent();
-                                    let test_dir = self.test_dirs().iter().find(|test_dir| {
-                                        let nimbleparse_toml::TestKind::Dir(glob) =
-                                            test_dir.kind.clone().into_inner();
-                                        {
-                                            let glob_path = self.workspace_path.join(glob);
-                                            let pattern =
-                                                glob::Pattern::new(glob_path.to_str().unwrap())
-                                                    .unwrap();
-                                            pattern.matches_path(parent.unwrap())
-                                        }
-                                    });
-                                    if let Some(test_dir) = test_dir {
-                                        let change = TestReparse {
-                                            path: path.to_path_buf(),
-                                            pass: test_dir.pass,
-                                        };
-                                        change_set.insert(change);
-                                    }
+                                    self.needs_reparsing(path, &mut change_set);
                                 }
                             }
                             self.output
@@ -980,25 +984,7 @@ impl ParseThread {
                                         );
                                         self.rebuild_parser_builder(&parser_data, &mut pb);
                                     } else {
-                                        let parent = path.parent();
-                                        let test_dir = self.test_dirs().iter().find(|test_dir| {
-                                            let nimbleparse_toml::TestKind::Dir(glob) =
-                                                test_dir.kind.clone().into_inner();
-                                            {
-                                                let glob_path = self.workspace_path.join(glob);
-                                                let pattern =
-                                                    glob::Pattern::new(glob_path.to_str().unwrap())
-                                                        .unwrap();
-                                                pattern.matches_path(parent.unwrap())
-                                            }
-                                        });
-                                        if let Some(test_dir) = test_dir {
-                                            let change = TestReparse {
-                                                path: path.to_path_buf(),
-                                                pass: test_dir.pass,
-                                            };
-                                            change_set.insert(change);
-                                        }
+                                        self.needs_reparsing(path, &mut change_set);
                                     }
                                 }
                                 Err(()) => {
